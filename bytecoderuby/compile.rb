@@ -26,9 +26,18 @@ module Ruby
 
     ########## Misc ########################################
     module Ignore
-      def compile_for_value(w);  child.compile_for_value(w);  end
-      def compile_for_void(w);   child.compile_for_void(w);   end
-      def compile_for_return(w); child.compile_for_return(w); end
+      def compile_for_value(w)
+	c = child
+	c.compile_for_value(w) if c
+      end
+      def compile_for_void(w)
+	c = child
+	child.compile_for_void(w) if c
+      end
+      def compile_for_return(w)
+	c = child
+	child.compile_for_return(w) if c
+      end
     end
 
     class MriNodeNewline
@@ -92,6 +101,15 @@ module Ruby
 	# FIXME real ruby doesn't call Array.[]
         w.ld_imm(Array)
         argc = unroll_onto_stack(w)
+        w.call(:[], argc)
+      end
+    end
+
+    class MriNodeHash
+      def compile_for_value(w)
+	# FIXME real ruby doesn't call Hash.[]
+        w.ld_imm(Hash)
+        argc = head.unroll_onto_stack(w)
         w.call(:[], argc)
       end
     end
@@ -195,23 +213,28 @@ module Ruby
     end	
 
     ############ Variables ###################################
-    module LocalAssign
+    module Assign
+      # Common code for assignments - looks after getting the
+      # value on to the stack
+      # Needs #assign_from_stack()
       include CompileForValueUsingVoid
       def compile_for_void(w, really_for_value = false)
-        # The value field will be nil for Masgn (multiple assignment) -
-        # the value will be waiting for us on the stack in this case
-	local_id, depth = w.locals.find_or_make_local(variable_id)
-
         value.compile_for_value(w) if value
-	
 	w.dup if really_for_value
+	assign_from_stack(w)
+      end 
+    end
 
+    module LocalAssign
+      include Assign
+      def assign_from_stack(w)
+	local_id, depth = w.locals.find_or_make_local(variable_id)
 	if depth == 0
 	  w.st_loc(local_id)
 	else
 	  w.st_loc_l(local_id, depth)
 	end
-      end 
+      end
     end
 
     module LocalAccess
@@ -255,38 +278,61 @@ module Ruby
     end
 
     class MriNodeIasgn
-      include CompileForValueUsingVoid
-      def compile_for_void(w, really_for_value = false)
-        # The value field will be nil for Masgn (multiple assignment) -
-        # the value will be waiting for us on the stack in this case
-	value.compile_for_value(w) if value
-	w.dup if really_for_value
+      include Assign
+      def assign_from_stack(w)
 	w.st_ivar(variable_id)
       end 
     end
 
     class MriNodeConst
+      include PushSelf
       def compile_for_value(w)
         # FIXME this is just a quick hack to allow method testing
-        w.ld_imm(Object).
-          ld_imm(variable_id).
-          call(:const_get, 1)
+	push_self(w)
+	w.ld_imm(variable_id).
+          call(:bcr_const_get, 1)	
+
+#    def bcr_const_get(const_name)
+#      o = (Class === self) ? self : self.class
+#      o.const_get(name)
+#    end
+#        w.ld_imm(Object).
+#	w.call(:class, 0)
+#       w.ld_imm(variable_id).
+#          call(:const_get, 1)
       end
     end
 
 
     #############  Class, method definitions #################
     class MriNodeClass
-      # FIXME super
-      # FIXME nested classes
-      # FIXME create new classes
-      def compile_for_void(w)
-	# replace current class (self) with contained class
-	w.ld_imm(Object).        # FIXME this should work off ruby_top_self
-          ld_imm(class_name).
-          call(:const_get, 1).
-          st_self
-        body.compile_for_void(w)
+      include PushSelf
+      include CompileForValueUsingVoid
+      def compile_for_void(w, really_for_value=false)
+	# Compile the class body into a separate method_writer
+        method_writer = Bytecode::Writer.new()
+
+	args = body.table
+        method_writer.locals.register_locals(args)
+	method_writer.num_args = args.size
+
+	body.compile_for_return(method_writer) if body
+
+	# Now the bytecode for the class; end statement itself
+	push_self(w)
+	w.ld_imm(class_name)
+	if zsuper
+	  zsuper.compile_for_value(w)
+	else
+	  w.ld_imm(nil)
+	end
+	w.call(:get_or_make_class, 2)
+
+	# .. this is where we use the class body - we run it with 
+	# the new (or retrieved) class as self
+	w.run(method_writer) unless method_writer.current_pc == 0
+
+	w.pop if !really_for_value
       end
     end
     
@@ -306,7 +352,7 @@ module Ruby
           print("Warning: block arguments to methods are currently ignored!\n")
         end
 
-        method_writer = Bytecode::Writer.new()
+        method_writer = Bytecode::Writer.new(nil, method_id)
 
         method_writer.locals.register_locals(normal_args)
 	method_writer.num_args = normal_args.size
@@ -398,16 +444,25 @@ module Ruby
     ######## Control flow #############################
     module NodeCall
       # Common code for MriNodeCall and MriNodeFcall
-      # Needs #put_receiver_on_stack
+      # Needs #put_receiver_on_stack, #compile_args, 
+      #   #method_name and #superp
       def compile_for_value(w, &block)
-	# temp hack
-	if method_id == :raise
-	  args.unroll_onto_stack(w)
-	  w.raise
-	  return
-	end
-
         put_receiver_on_stack(w)
+	argc = compile_args(w)
+	w.call(method_name(w), argc, superp, &block)
+      end
+    end
+    
+    module NotSuper
+      def superp; false; end
+    end
+
+    module Super
+      def superp; true; end
+    end
+
+    module ExplicitArgs
+      def compile_args(w)
 	case args
 	when MriNodeArray     # normal args only, no scatter
 	  argc = args.unroll_onto_stack(w)
@@ -422,20 +477,48 @@ module Ruby
 	else
 	  raise "Found unknown node when compiling args: #{args.type}"
 	end
-	w.call(method_id, argc, &block)
+	argc
       end
     end
 
     class MriNodeCall
-      include NodeCall
+      include NodeCall, NotSuper, ExplicitArgs
       def put_receiver_on_stack(w)
         receiver.compile_for_value(w)
+      end
+      def method_name(w)
+	method_id
       end
     end
 
     class MriNodeFcall
-      include NodeCall, PushSelf
+      include NodeCall, PushSelf, NotSuper, ExplicitArgs
       alias :put_receiver_on_stack :push_self
+      def method_name(w)
+	method_id
+      end
+    end
+
+    class MriNodeSuper
+      include NodeCall, PushSelf, Super, ExplicitArgs
+      alias :put_receiver_on_stack :push_self
+      def method_name(w)
+	w.method_name
+      end
+    end
+
+    class MriNodeZsuper
+      include NodeCall, PushSelf, Super
+      alias :put_receiver_on_stack :push_self
+      def method_name(w)
+	w.method_name
+      end   
+      def compile_args(w)
+	# FIXME *args also
+	num_args = w.num_args + w.num_opt_args
+	(0...num_args).each { |local_id| w.ld_loc(local_id) }
+	num_args
+      end
     end
 
     class MriNodeIter
@@ -735,9 +818,21 @@ rest of code
     ######## Exceptions #############################
     class MriNodeRescue
       def compile_for_value(w)
-	w.handlers.rescue(resque) do
-	  head.compile_for_value(w)
-	end
+	#     head         protected by handler
+	#     else         protected by prev handler
+	#     goto         no_exception
+	#     handler      protected by prev handler
+	#     no_exception:
+	w.handlers.rescue(head, zelse, resque)
+
+
+#	w.handlers.rescue(resque,
+#			  proc do
+#			    head.compile_for_value(w) if head
+#			  end,
+#			  proc do
+#			    self.zelse.compile_for_value(w) if self.zelse
+#			  end)
       end
     end
 
@@ -767,11 +862,13 @@ rest of code
 	
 	# come here if we had a match
 	w.label(code_lbl)
-	w.pop                  # remove test value
-	if body	       
-	  body.send(compile_msg, w) 
+
+	if body
+	  rbody = maybe_store_exception(w, body)
+	  rbody.send(compile_msg, w) if rbody
 	else
 	  # empty rescue clause body
+	  w.pop   # remove exception value
 	  w.ld_imm(nil) if really_for_value
 	end
 	w.goto(out_lbl)
@@ -785,6 +882,41 @@ rest of code
 	  w.rehandle
 	end
       end
+
+      def maybe_store_exception(w, resbody)
+	# Handle the '=> e' part of 'rescue Exception => e'
+	# Unfortunately this Ruby construct gets mangled into 
+	# Block(Assign(e, Gvar($!))) in the parse tree, so we have to 
+	# hack about a bit to detect it
+
+	if resbody.kind_of?(MriNodeBlock)
+	  assign = resbody.head
+	  retval = resbody.next_node
+	else
+	  assign = resbody
+	  retval = nil
+	end
+
+	if assign.kind_of?(Assign) and 
+	   (gvar = assign.value).kind_of?(MriNodeGvar) and
+	   gvar.entry == :$!
+
+	  # This covers the very obscure case of 'rescue blah => e; end'
+	  # ie no actual handler code. In this case, the value 
+	  # of the rescue expression is the exception, so we dup the 
+	  # exception so that it gets left on the stack after the store.
+	  # FIXME what if rescue is in void context?
+	  w.dup unless retval
+
+	  assign.assign_from_stack(w)
+
+	  resbody = retval
+	else
+	  w.pop   # remove exception value
+	end
+
+	return resbody
+      end
     end
 
   end
@@ -795,7 +927,7 @@ module Bytecode
   def Bytecode.compile_and_run_for_void(ruby_src)
 
     p = Ruby::Interpreter.parse(ruby_src)
-    #print "\n#{p.inspect}\n\n"
+    print "\n#{p.inspect}\n\n" if ARGV.include?("-print")
 
     p.compile_for_void(w = Writer.new())
     w.ld_imm(nil).return(0)
@@ -807,12 +939,13 @@ module Bytecode
   end
   def Bytecode.compile_and_run_for_return(ruby_src)
     p = Ruby::Interpreter.parse(ruby_src)
-    #print "\n#{p.inspect}\n\n"
+    print "\n#{p.inspect}\n\n" if ARGV.include?("-print")
 
     p.compile_for_return(w = Writer.new())
     w.compile()
-    #puts w.to_s
+#    puts w.to_s if ARGV.include?("-print")
 
     Runner.run_from_writer(w)
   end
 end
+

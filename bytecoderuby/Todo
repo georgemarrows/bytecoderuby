@@ -7,10 +7,12 @@ Ruby language support
 	- call stack; call bytecode methods from bytecode methods
 	- arguments: scatter args, gather args, optional args
 	- multiple results
+	* block args (eg (a, b, &c))
 - instance variables
 * call
 	* trap no such method errors
 	* test for -2 argc methods
+	- call to super
 * blocks
 	- pass blocks
 	- yield
@@ -19,12 +21,21 @@ Ruby language support
 	- dynamic local variables
 	- pass blocks to C functions
 	* ampersand parameters to methods
-* class, module definitions
+- class defintions
+* module definitions
 * get and set constants
 - singleton methods
-* exceptions: raise and rescue
+* exceptions	
+	- raise
+	- rescue
+	- else after rescue
+    	* retry
+    	* integrate compilation with case statement
+    	- unwind value stack along with call stack
+	- catch exceptions raised in C
+	- remove RAISE bytecode hack - use C method like MRI
 * ensure
-* throw, catch
+- throw, catch
 * global variables
 
 Ruby library support
@@ -39,6 +50,9 @@ Ruby library support
 * threads
 * continuations
 * rb_frame_last_func (see rb_num_coerce_bin)
+* Module.constants
+* security levels
+* Class.inherited and similar callbacks
 
 Compiler
 ========
@@ -46,7 +60,7 @@ All the above plus:
 - allow methods to take arguments
 - not
 - array literals
-* hash literals
+- hash literals
 * range literals
 * range flip-flops
 * $_ (or does this belong in language support above?)
@@ -62,15 +76,21 @@ All the above plus:
 
 Bugs
 ====
-* testStackAndJumps
-* cross-refs between the Bytecode::Writer::Manager classes are ugly
+* Failing tests in
+	* testStackAndJumps
+	* testRescue2
+	* testRescue3
+	* testSuper
+	* testClasses
+	* testConsts
+* cross-refs between the Bytecode::Writer::*Manager classes are ugly
 
 Interpreter infrastructure
 ==========================
 - declare bytecode format in Ruby
 - Bytecode::Writer should calculate number of locals
 * memory leaks
-* per-frame stacks?
+- per-frame stacks? (yes - necessary for stack unwinding)
 * bytecode dump and load
 * string, integer literals
 * declare bytecode effects in Ruby (like vmgen)
@@ -79,16 +99,17 @@ Interpreter infrastructure
 Other guff
 ==========
 - make Writer pretty print itself so eg blocks are indented
-- move to Ruby 1.6.7
-* move to Ruby 1.7
+* move to Ruby 1.6.8
+* move to Ruby 1.8.0
 * change compilation options to use -Wall or similar
-* write C case statements for bytecode from Ruby?
+* document all methods using RDoc
 
 Possible future optimisations
 =============================
 - optimise frames
 	- allocate locals 'inline' with struct frame
 	- allocate frames from a linear stack where possible (eg no block calls)
+* avoid gotos in rescue statements - make exceptionless route jumpless
 * inline various interpreter C functions
 * threaded bytecode dispatch
 * optimise argument handling for method calls

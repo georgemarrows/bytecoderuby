@@ -21,13 +21,14 @@ module Bytecode
     # The number of arguments expected by the block code held in
     # this Writer
     attr_accessor :num_locals, :num_args, :opt_args_jump_points, :rest_arg
-    attr_reader   :parent, :depth, :current_pc
+    attr_reader   :parent, :method_name, :depth, :current_pc
 
     attr_reader   :locals, :loops, :labels, :handlers
 
-    def initialize(parent = nil)
+    def initialize(parent = nil, method_name = nil)
       @parent      = parent
       @depth       = parent ? parent.depth + 1 : 0
+      @method_name = method_name
 
       @code        = []   # holds the bytecode instruction objects
       @current_pc  = 0
@@ -36,6 +37,11 @@ module Bytecode
       @loops  = LoopManager.new(self)
       @labels = LabelManager.new(self)
       @handlers = HandlerManager.new(self)
+    end
+
+    def num_opt_args
+      return 0 unless opt_args_jump_points
+      opt_args_jump_points.size - 1
     end
 
     def to_s
@@ -67,7 +73,7 @@ module Bytecode
     end
 
     # Instructions requiring special handling
-    def call(method_id, num_args)
+    def call(method_id, num_args, superp=false)
 	if block_given?
 	    # allow block or method defn. code to be added
 	    code = Writer.new(self)
@@ -75,7 +81,8 @@ module Bytecode
 	else
 	    code = nil
 	end
-	instruction = Call.new(method_id, num_args, code)
+        superp = superp ?  1 : 0
+	instruction = Call.new(method_id, num_args, superp, code)
 	add_instruction(instruction)
     end
 
@@ -111,7 +118,7 @@ module Bytecode
     def compile
       return if @result # ie if previously compiled
 
-      @handlers.compile_all()
+#      @handlers.compile_all()
 
       @result = []
 
@@ -139,11 +146,11 @@ end
 module Bytecode
   class Writer
     class Manager
-      attr_reader :owner, :parent
+      attr_reader :writer, :parent
 
-      def initialize(owner)
-	@owner       = owner
-	@parent      = owner.parent
+      def initialize(writer)
+	@writer       = writer
+	@parent      = writer.parent
       end
     end
   end
@@ -158,7 +165,7 @@ module Bytecode
     class LocalManager < Manager
       private
 
-      def initialize(owner)
+      def initialize(writer)
 	super
 
 	@locals      = {}   # map from local name to id
@@ -212,19 +219,19 @@ module Bytecode
   class Writer
     class LoopManager < Manager
 
-      def initialize(owner)
+      def initialize(writer)
 	super
 
 	@loop_stack  = []   # tracks loop nesting in the source
 
-	# Add place holder to loop stack if we represent a block.
+	# Add place holder to loop stack if our writer represents a block.
 	# Used by break, next etc to decide how to compile themselves.
-	@loop_stack.push(BlockLoop.new(owner)) if parent
+	@loop_stack.push(BlockLoop.new(writer)) if parent
       end
 
       # Loops
       def while_loop
-	loop = WhileLoop.new(owner)
+	loop = WhileLoop.new(writer)
 	@loop_stack.push(loop)
 	begin
 	  yield loop
@@ -293,7 +300,7 @@ module Bytecode
   class Writer
     class LabelManager < Manager
 
-      def initialize(owner)
+      def initialize(writer)
 	super
 
 	@labels      = {}   # map from label to instruction offset
@@ -306,7 +313,7 @@ module Bytecode
 
       def offset_for_label(name)
 	offset = @labels[name] or raise "No such label #{name}"
-	return offset - owner.current_pc
+	return offset - writer.current_pc
       end
 
       def new(name = "1")
@@ -323,123 +330,70 @@ module Bytecode
 end
 
 
+
+
+
+
+
+
 module Bytecode
   class Writer
 
     class HandlerManager < Manager
-      def initialize(owner)
+      def initialize(writer)
 	super
 	@stack    = [] # tracks the nesting structure of rescue clauses
 	@handlers = [] # final list of all handlers
       end
 
-      def with_handler_context(handler, &p)
+      def with_handler_context(handler_class, node)
+	return unless node
+	handler = handler_class.new(writer)
 	@stack.push(handler)
-	p.call()
+	node.compile_for_value(writer)
 	@stack.pop
-      end
-
-      def add_handler(handler)
-	handler.end() 
+	handler.end()
 	@handlers.push(handler)
+	return handler
       end
 
-      def rescue(handler_code, &p)
-	handler = RescueHandler.new(owner, @stack[-1], handler_code)
-	with_handler_context(handler, &p)
-	add_handler(handler)
+      def rescue(head, zelse, resque)
+#	if !head
+#	  zelse.compile_for_value(writer) if zelse
+#	  return
+#	end
+	no_exception_label = writer.labels.new("no_exception")
+	handler = with_handler_context(Handler, head)
+
+	zelse.compile_for_value(writer) if zelse
+	writer.goto(no_exception_label)
+
+	handler.set_handler_pc()
+	resque.compile_for_value(writer, no_exception_label) if resque
+
+	writer.label(no_exception_label)
       end
 
-      def compile_all()
-	# NB we can't use .each because nested handlers
-	# might cause @handlers to be added to while we're
-	# iterating over it
-	i = 0
-	while (i < @handlers.size)
-	  @handlers[i].compile()
-	  i += 1
-	end
-	# Now we've compiled them all we need to fix up the 
-	# handler pcs where necessary.
-	@handlers.each do |handler|
-	  handler.fixup()
-	end
-	owner.return(0)    # FIXME dummy to keep the C code check happy
-      end
-      
       def to_s
 	result = ""
 	@handlers.each {|handler| result << handler.to_s << "\n"}
 	result
       end
 
-
       class Handler
         attr_reader :start_pc, :end_pc, :handler_pc
-	def initialize(owner, parent_handler)
-	  @owner = owner
-	  @start_pc = owner.current_pc
-	  @parent_handler = parent_handler
+	def initialize(writer)
+	  @writer = writer
+	  @start_pc = writer.current_pc
 	end
 	def end()
-	  @end_pc = @owner.current_pc
+	  @end_pc = @writer.current_pc
 	end
-	def compile(); end
-	def fixup();   end
+	def set_handler_pc()
+	  @handler_pc = @writer.current_pc
+	end
 	def to_s
 	  "#{type.name}: #{start_pc} - #{end_pc} jumping to #{handler_pc}"
-	end
-      end
-
-      class FixupHandler < Handler
-	def fixup()
-	  @handler_pc = @parent_handler.handler_pc  
-	end
-      end
-
-      class RescueHandler < Handler
-	def initialize(owner, parent_handler, handler_code)
-	  super(owner, parent_handler)
-	  @handler_code = handler_code
-	  @out_lbl      = owner.labels.new("out")
-	end
-
-	def end()
-	  super
-	  @owner.label(@out_lbl)
-	end
-
-	def compile()
-	  if @parent_handler
-	    int_compile_with_fixup()
-	  else
-	    int_compile()
-	  end
-	end
-	def int_compile()
-	  @handler_pc = @owner.current_pc
-	  @handler_code.compile_for_value(@owner, @out_lbl)
-	  @owner.goto(@out_lbl)
-	end
-	def int_compile_with_fixup()
-	  # In code like begin; begin; rescue A; end rescue B; end,
-	  # the A handler must be protected by the B handler.
-	  # However, the A code is compiled after the outer
-	  # handler has been removed from the handler stack. The B
-	  # handler is therefore recorded in the A handler as its 
-	  # @parent_handler. When we compile the A handler, we add
-	  # an additional 'fixup' handler to the handler list, which protects
-	  # A and points at the B handler. We don't initially
-	  # know the handler_pc for the B handler, so we just store
-	  # a ref at first (in parent_handler). Later, in the fixup
-	  # phase of handler compilation, we can resolve the parent_handler
-	  # into a handler_pc reference (see FixupHandler).
-	  handler_manager = @owner.handlers
-	  h = FixupHandler.new(@owner, @parent_handler)
-	  handler_manager.with_handler_context(@parent_handler) do 
-	    int_compile()
-	  end
-	  handler_manager.add_handler(h)
 	end
       end
     end
@@ -447,3 +401,4 @@ module Bytecode
 
   end
 end
+

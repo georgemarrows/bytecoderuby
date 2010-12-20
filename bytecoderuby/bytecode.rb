@@ -87,8 +87,8 @@ DEFS FIXME
 LD_SELF
 Pushes self on to the stack
 
-ST_SELF
-Pops the stack and stores the value into self. (Short term hack!)
+RUN,   [code]
+Pops the stack and runs CODE with that object as self.
 =end
 
 module Bytecode
@@ -174,13 +174,14 @@ module Bytecode
 
   instruction 'LD_IMM',      ['value']
   instruction 'LD_SELF',     []
-  instruction 'ST_SELF',     []
   instruction 'LD_LOC',      ['var'],                   'LocalInstruction' 
   instruction 'LD_LOC_L',    ['var', 'count'],          'LocalInstruction' 
   instruction 'ST_LOC',      ['var'],                   'LocalInstruction'  
   instruction 'ST_LOC_L',    ['var', 'count'],          'LocalInstruction' 
   instruction 'LD_IVAR',     ['var_id']
   instruction 'ST_IVAR',     ['var_id']
+  instruction 'LD_GVAR',     ['var_id']
+
 
   instruction 'DUP',         []
   instruction 'POP',         []
@@ -191,16 +192,15 @@ module Bytecode
   instruction 'IF',          ['offset'],                'BranchInstruction'
   instruction 'IF_NOT',      ['offset'],                'BranchInstruction'
 
-  instruction 'CALL',        ['method_id', 'num_args', 'block']
+  instruction 'CALL',        ['method_id', 'num_args', 'superp', 'block']
   instruction 'RETURN',      ['count']	
   instruction 'YIELD',       ['num_args', 'count']
   instruction 'BREAK',       []
+  instruction 'RUN',         ['code']
 
   instruction 'DEFN',        ['name', 'code']
   instruction 'DEFS',        ['name', 'code']
 
-  # temporary instruction for initial rescue, ensure coding	
-  instruction 'RAISE',       []
   instruction 'REHANDLE',    []
 
   def Bytecode.each_instruction

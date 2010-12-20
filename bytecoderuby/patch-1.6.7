@@ -1,5 +1,5 @@
---- /dos2/George/ruby/ruby-1.6.7/eval.c	Wed Feb 27 04:50:29 2002
-+++ /dos2/George/ruby/ruby-1.6.7.hack/eval.c	Tue Apr  9 20:53:30 2002
+--- eval.c	Wed Feb 27 04:50:29 2002
++++ eval.c	Sun Dec  1 14:59:26 2002
 @@ -253,7 +253,7 @@
      return body;
  }
@@ -9,7 +9,24 @@
  rb_get_method_body(klassp, idp, noexp)
      VALUE *klassp;
      ID *idp;
-@@ -3510,6 +3510,7 @@
+@@ -729,16 +729,6 @@
+     ruby_iter = _iter.prev;		\
+ }
+ 
+-struct tag {
+-    jmp_buf buf;
+-    struct FRAME *frame;
+-    struct iter *iter;
+-    ID tag;
+-    VALUE retval;
+-    struct SCOPE *scope;
+-    int dst;
+-    struct tag *prev;
+-};
+ static struct tag *prot_tag;
+ 
+ #define PUSH_TAG(ptag) {		\
+@@ -3510,6 +3500,7 @@
  rb_block_given_p()
  {
      if (ruby_frame->iter) return Qtrue;
@@ -17,7 +34,7 @@
      return Qfalse;
  }
  
-@@ -3544,6 +3545,14 @@
+@@ -3544,6 +3535,14 @@
      int state;
      static unsigned serial = 1;
  
@@ -32,7 +49,7 @@
      if (!rb_block_given_p()) {
  	rb_raise(rb_eLocalJumpError, "no block given");
      }
-@@ -4050,6 +4059,7 @@
+@@ -4050,6 +4049,7 @@
      return result;
  }
  
@@ -40,7 +57,7 @@
  VALUE
  rb_with_disable_interrupt(proc, data)
      VALUE (*proc)();
-@@ -4237,7 +4247,7 @@
+@@ -4237,7 +4237,7 @@
      }
  }
  
@@ -49,7 +66,7 @@
  call_cfunc(func, recv, len, argc, argv)
      VALUE (*func)();
      VALUE recv;
-@@ -4395,6 +4405,15 @@
+@@ -4395,6 +4395,15 @@
  	    }
  	}
  	break;
@@ -65,7 +82,7 @@
  
  	/* for attr get/set */
        case NODE_IVAR:
-@@ -4562,7 +4581,40 @@
+@@ -4562,7 +4571,40 @@
      return result;
  }
  
@@ -107,7 +124,7 @@
  rb_call(klass, recv, mid, argc, argv, scope)
      VALUE klass, recv;
      ID    mid;
-@@ -8989,6 +9041,8 @@
+@@ -8989,6 +9031,8 @@
      rb_define_method(cThGroup, "list", thgroup_list, 0);
      rb_define_method(cThGroup, "add", thgroup_add, 1);
      rb_define_const(cThGroup, "Default", thgroup_s_new(0, 0, cThGroup));
@@ -116,8 +133,47 @@
  }
  
  static VALUE
---- /dos2/George/ruby/ruby-1.6.7/node.h	Wed Feb 27 04:50:30 2002
-+++ /dos2/George/ruby/ruby-1.6.7.hack/node.h	Mon Apr  1 12:53:34 2002
+@@ -9090,4 +9134,38 @@
+ 	}
+ 	tt = tt->prev;
+     }
++}
++
++
++void
++bc_push_tag(struct tag *_tag) {
++
++  _tag->retval = Qnil;		     
++  _tag->frame = ruby_frame;		
++  _tag->iter = ruby_iter;		
++  _tag->prev = prot_tag;		
++  _tag->scope = ruby_scope;		
++  //  _tag->tag = ptag;			
++  _tag->dst = 0;			
++
++  //  _tag->prev = prot_tag;
++  prot_tag  = _tag;
++}
++
++
++void 
++bc_pop_tag(struct tag *_tag) {
++  prot_tag = _tag->prev;
++}
++
++
++void 
++bc_jump_tag(int state) {
++  JUMP_TAG(state);
++}
++
++
++VALUE
++bc_current_exception() {
++  return ruby_errinfo;
+ }
+--- node.h	Wed Feb 27 04:50:30 2002
++++ node.h	Mon Apr  1 13:53:34 2002
 @@ -121,6 +121,7 @@
      NODE_DMETHOD,
      NODE_BMETHOD,
@@ -126,9 +182,9 @@
      NODE_LAST
  };
  
---- /dos2/George/ruby/ruby-1.6.7/ruby.h	Tue Feb 26 13:08:17 2002
-+++ /dos2/George/ruby/ruby-1.6.7.hack/ruby.h	Fri Apr  5 21:31:00 2002
-@@ -618,6 +618,17 @@
+--- ruby.h	Tue Feb 26 13:08:17 2002
++++ ruby.h	Fri Nov 29 22:05:16 2002
+@@ -618,6 +618,31 @@
  #define rb_sys_stat stat
  #endif
  
@@ -142,6 +198,20 @@
 +  int   (*block_given_p) _(( void ));
 +
 +} bcr_hooks;
++
++#include <setjmp.h>
++
++struct tag {
++    jmp_buf buf;
++    struct FRAME *frame;
++    struct iter *iter;
++    ID tag;
++    VALUE retval;
++    struct SCOPE *scope;
++    int dst;
++    struct tag *prev;
++};
++
 +
  #if defined(__cplusplus)
  }  /* extern "C" { */

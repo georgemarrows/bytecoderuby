@@ -8,9 +8,6 @@ require 'compile'
 # FIXME necessary until we get GC integrated properly
 GC.disable
 
-# Create the class 'cos BCR can't do it for itself currently
-class BCRTestClass; end
-
 class TestByteCodeRuby < RUNIT::TestCase
 
 
@@ -59,13 +56,22 @@ class TestByteCodeRuby < RUNIT::TestCase
       results(mri_loop_src, bcr_loop_src, src)
     end
   else
-    def compare(mri_src, bcr_src = mri_src, print_src = mri_src)
-      # ensure MRI and BCR return the same result when 
+    def compare( mri_src, 
+		 bcr_src = mri_src, print_src = mri_src,
+		 post_process = nil )
+      # Ensure MRI and BCR return the same result when 
       # they run MRI_SRC and BCR_SRC. PRINT_SRC is the src code
-      # to print, if result printing is turned on.
+      # to print, if result printing is turned on. If specified, 
+      # POST_PROCESS is a proc to that gets run on the return values 
+      # of MRI_SRC and BCR_SRC before they are compared.
+
+      print = ARGV.include?("-print")
+
+      puts "\n*** Compiling: #{print_src}" if print
 
       begin
-	mri_val = eval mri_src
+	# ensure MRI evals run in the same context as BCR evals.
+	mri_val = eval(mri_src, TOPLEVEL_BINDING)
       rescue Exception => mri_val
       end
 
@@ -74,15 +80,15 @@ class TestByteCodeRuby < RUNIT::TestCase
       rescue Exception => bcr_val
       end      
 
-      print = false
-#      print = true
+      if post_process
+	mri_val, bcr_val = post_process.call(mri_val, bcr_val) 
+      end
 
       if print
-	puts "\n#{print_src}"
-	puts " ==> #{mri_val.inspect}"
-	puts " ==> #{bcr_val.inspect}"
-	# only print backtrace if compilation error
-	if Exception === bcr_val
+	puts " MRI ==> #{mri_val.inspect}"
+	puts " BCR ==> #{bcr_val.inspect}"
+	# print backtrace if compilation error
+	if Exception === bcr_val and bcr_val.backtrace 
 	   if bcr_val.backtrace.find {|l| /compile_for/.match(l)}
 	    puts bcr_val.backtrace 
 	  end
@@ -90,10 +96,14 @@ class TestByteCodeRuby < RUNIT::TestCase
       end
 
       if Exception === mri_val
-	# slice off line numbers etc from MRI exceptions cos BCR doesn't do these yet
-	mri_msg = /: ([^:]*)$/.match(mri_val.message)[1]
 	assert_equal( mri_val.class, bcr_val.class )
-	assert_equal( mri_msg,       bcr_val.message )
+
+	# Remove a) line numbers and b) details of where exception
+	# was raise MRI exceptions cos BCR doesn't do these yet
+	mri_msg = mri_val.message.gsub(/\(eval\):\d*:\s*/, "").
+	                          gsub(/in `.*':\s*/, "")
+	assert_equal( mri_msg, bcr_val.message )
+
       else
 	# no exception
 	assert_equal( mri_val, bcr_val )
@@ -106,12 +116,31 @@ class TestByteCodeRuby < RUNIT::TestCase
 	      "obj = BCRTestClass.new; #{src}",
 	      src)
     end
+    def remove_string(val, remove)
+      if String === val
+	val.gsub(remove, "")
+      else
+	val
+      end
+    end
+    def compare_class(src)
+      compare( "class MRITestClass; #{src}; end",
+	       "class BCRTestClass; #{src}; end",
+	       src,
+	       # postprocessor to remove MRI & BCR strings if present
+	       proc do |mri_val, bcr_val|
+		 a = remove_string(mri_val, "MRI")
+		 b = remove_string(bcr_val, "BCR")
+		 [a, b]
+	       end )
+
+    end
   end
 
   def add_test_methods(src)
     # Native Ruby class
     mri_src = "class MRITestClass; #{src}; end"
-    eval(mri_src)
+    eval(mri_src, TOPLEVEL_BINDING)
     
     # BCR class
     bcr_src = "class BCRTestClass; #{src}; end"
@@ -131,7 +160,8 @@ class TestByteCodeRuby < RUNIT::TestCase
     compare '/regex/'
     compare '1+2'
     compare '[]'
-    compare '[1,2,3]'
+    compare %q{ [1, 2, 'a', 'b', :a, :b]  }
+    compare %q{ {1=>2, 'a'=>'b', :a=>:b} }
   end
 
   def testLiteralCopies
@@ -163,7 +193,7 @@ class TestByteCodeRuby < RUNIT::TestCase
 	a
       end
       def to_s
-	"blah"
+	"blah" + "abc"
       end
     EORUBY
 
@@ -331,7 +361,7 @@ class TestByteCodeRuby < RUNIT::TestCase
     compare 'b = 1; c = 2; d = [3, 4]; a = b, c, *d; a'
     compare 'b = 1; c = 2; d = [3, 4]; a = b, c, *d'
 
-    # the [a], [b] .. ] trick lets us make sure that each of
+    # the [[a], [b] .. ] trick lets us make sure that each of
     # a, b etc have the same value as in MRI
     compare 'a, b, c = [1, 2, 3]; [[a], [b], [c]]'
     compare 'a, b, c = [1, 2, 3]'
@@ -369,6 +399,7 @@ class TestByteCodeRuby < RUNIT::TestCase
 
 
   def testMethods
+
     add_test_methods <<-EORUBY
       def single_result
 	1
@@ -402,6 +433,7 @@ class TestByteCodeRuby < RUNIT::TestCase
     compare_method 'obj.args(1, *[2, 3])'
     compare_method 'z = [2, 3]; obj.args(1, *z)'
     compare_method 'obj.args(*[1, 2, 3])'
+    compare_method 'obj.args(1, 2, 3=>4, 5=>6)'
 
     # calling C methods with too many / too few args
     compare_method '"abc".tr("a", "b", "c")'
@@ -410,6 +442,9 @@ class TestByteCodeRuby < RUNIT::TestCase
     # calling Ruby methods with too many / too few args
     compare_method 'obj.args(1, 2, 3, 4)'
     compare_method 'obj.args(1, 2)'
+
+    # non-existent method
+    compare %{ "test".does_not_exist }
   end
 
   def testArgs
@@ -458,8 +493,8 @@ class TestByteCodeRuby < RUNIT::TestCase
 
   def testBlocks
     # - yield for value, yield for void
-    # * yield args: none, one, many
-    # * arguments: none, multiple, gather, scatter
+    # - yield args: none, one, many
+    # - arguments: none, multiple, gather, scatter
     # - access & assign to vars from enclosing scope
     # - nested blocks
 
@@ -662,9 +697,9 @@ class TestByteCodeRuby < RUNIT::TestCase
 
   def testRescue
 
-    compare <<-EORUBY # test raising
-      raise ParentError
-    EORUBY
+    # test raising
+    compare %{ raise "abc" }
+    compare %{ raise ParentError }
 
     stmts = [
       # no exception
@@ -766,6 +801,26 @@ class TestByteCodeRuby < RUNIT::TestCase
 	    1; raise ParentError; 2
           rescue GrandChildError, ChildError; 3
           end },
+      # else - no exception (else executed)
+      %q{ begin;             0
+          rescue ChildError; 1
+          else;              2
+          end },
+      # else - exception (else not executed)
+      %q{ begin;             0; raise ChildError
+          rescue ChildError; 1
+          else;              2
+          end },
+      # else - uncaught exception
+      %q{ begin;             0; raise ParentError
+          rescue ChildError; 1
+          else;              2
+          end },
+      # else - exception raised in else
+      %q{ begin;             0  # FIXME leaves unwanted item on stack
+          rescue ChildError; 1
+          else;              2; raise ChildError
+          end },
     ]
 
     stmts.each do |stmt|
@@ -830,10 +885,46 @@ class TestByteCodeRuby < RUNIT::TestCase
       rescue ParentError;       6
       end
     EORUBY
+  end
 
+  def testRescue2
+    compare <<-EORUBY  # capture the raised exception
+      begin
+	raise ParentError
+      rescue ParentError => c
+	c.class
+      end
+    EORUBY
 
-return 
-    # failing tests
+    compare <<-EORUBY  # capture the raised exception ..
+      begin
+	raise ParentError
+      rescue ParentError => c
+	# .. but don't do anything with it (= strange code!)
+	# Value of this expression is the ParentError ?!
+      end
+    EORUBY
+
+    compare <<-EORUBY 
+      2.times {
+        begin
+	  raise ParentError
+        rescue ParentError => c  # this store is Dasgn_curr cos of the block
+        end
+      }
+    EORUBY
+
+    compare <<-EORUBY 
+      c = nil
+      2.times {
+        begin
+	  raise ParentError
+        rescue ParentError => c # this one is Lasgn to outer block
+        end
+      }
+      c
+    EORUBY
+
     compare %q{
       i = 0;
       while i < 5
@@ -843,26 +934,373 @@ return
           break
         end
       end; i }
-    
+
+    compare <<-EORUBY
+      begin
+	raise ParentError
+      rescue ParentError
+	q = 1
+      end
+      q
+    EORUBY
+
+return 
+    compare %{
+      begin   # can't cope with empty body
+      rescue ParentError
+      end
+    }
+
+    compare <<-EORUBY
+      begin
+	1 
+      rescue ParentError
+	qq = 1
+      end
+      qq   # should default to nil
+    EORUBY
+
+
     compare <<-EORUBY
       begin;  raise "cain"
       rescue "not an exception class"
       end
     EORUBY
 
-    # TO TEST
-    # resume execution after a rescue clause
-    # TO DO
-    # else
-    # retry
-    # integrate compilation with case statement
-    # unwind value stack along with call stack
-   
   end
-  
+
+  def testRescue3
+    compare %{ 1 / 0 }
+
+    # Error raised in C code
+    compare %{
+      begin
+	1/0
+      rescue ZeroDivisionError
+	"zero div error"
+      end
+    }
+
+    # Stack is bytecode-C-bytecode-C when error raised
+    compare %{
+      begin
+	[1,2].each {|dummy| 1/0}
+      rescue ZeroDivisionError
+	"zero div error"
+      end
+    }
+
+    # Re-raise an exception
+    compare %{
+      begin
+	[1,2].each {|dummy| 1/0}
+      rescue ZeroDivisionError
+	raise()
+      end
+    }
+
+    # Does re-raised exception = previous exception?
+    compare %{
+      e = e2 = nil    # FIXME only BCR requires this decl
+      begin 
+	begin
+	  raise ParentError
+	rescue ParentError => e
+	  raise()
+	end
+      rescue ParentError => e2
+      end
+      e.equal?(e2)
+    }
+
+return
+    # this fails when raise() in position 3 - we don't reset $!
+    # after the end of the GrandChildError
+    stmt = %{
+      begin
+	raise ChildError
+      rescue ChildError
+	1
+	begin
+	  raise GrandChildError
+	rescue GrandChildError
+	  2
+	end
+        3
+      end 
+    }
+
+    (1..3).each do |x| 
+      compare stmt.gsub(x.to_s, "raise()")
+    end
+
+
+    # FIXME - this one is easy to fix
+    compare %{
+      begin
+	raise StandardError
+      rescue  # empty rescue catches StandardError
+	1
+      end
+    }
+
+  end
+
+  def testSuper
+    add_test_methods %{
+      class X;      
+	def simple(a); a + 1; end; 
+      end
+      class Y < X;
+	def no_super(); super(); end;
+      end
+    }
+
+    # override only
+    compare_class %{ 
+      class Y < X; def simple(a); a + 10; end; end
+      Y.new.simple(100) 
+    }    
+
+    # standard call to super
+    compare_class %{ 
+      class Y < X; def simple(a); super(a + 10); end; end
+      Y.new.simple(100) 
+    }    
+
+    # call to super with wrong # args
+    compare_class %{ 
+      class Y < X; def simple(a); super(); end; end
+      Y.new.simple(100) 
+    }    
+
+    # override method has diff #args to super
+    compare_class %{ 
+      class Y < X; def simple(a,b); super(a + b); end; end
+      Y.new.simple(100,10) 
+    }    
+
+    # call to super with no args
+    compare_class %{ 
+      class Y < X; def simple(a); super; end; end
+      Y.new.simple(100) 
+    }    
+
+    # call to super with no args; args changed before super call
+    compare_class %{ 
+      class Y < X; def simple(a); a += 10; super; end; end
+      Y.new.simple(100) 
+    }    
+
+    # call to super with no args; override method has diff #args
+    compare_class %{ 
+      class Y < X; def simple(a,b); super; end; end
+      Y.new.simple(100,10) 
+    }    
+
+    # call to super with no args, override method has optional arg
+    compare_class %{ 
+      class Y < X; def simple(a, b=10); super; end; end
+      Y.new.simple(100) 
+    }    
+
+    # call to super with no args, override method has unused rest arg
+    compare_class %{ 
+      class Y < X; def simple(a, *c); super; end; end
+      Y.new.simple(100) 
+    }    
+
+    # super call to C method from singleton method
+    compare %{
+      o = "test"
+      def o.size; super * 2; end
+      o.size
+    }
+
+    # FIXME super call to methods in modules?
+
+return 
+
+    # Failing tests
+    
+    # call to super in a method which doesn't have a super
+    # fix this when correcting calls to private etc
+    compare_class %{ Y.new.no_super() }
+
+    # FIXME check these in 1.7.3/1.8.0 before implementing
+    # call to super with no args, override method has used rest arg
+    compare_class %{ 
+      class Y < X; def simple(a, *c); super; end; end
+      Y.new.simple(100, 1000, 10000) 
+    }    
+
+    # call to super with no args, override method has optional and rest arg
+    compare_class %{ 
+      class Y < X; def simple(a, b=10, *c); super; end; end
+      Y.new.simple(100) 
+    }    
+
+  end
+
+
+  def testStack
+    # FIXME - not sure what this is testing!
+    compare <<-EORUBY
+      "a" + (["b", "c"].each {|a| a})
+    EORUBY
+  end
+
+  def testClasses
+
+    # Ensure both MRI and BCR are running in the same context
+    compare %{ self }
+
+    compare %{ self.class.constants.sort }
+
+    compare %{ Object }
+
+    # Class creation
+    compare_class %{ 
+      class A
+      end
+      A.name
+    }
+
+    compare_class %{
+      class B
+	self.name
+      end
+    }
+
+    compare_class %{
+      class C
+	class D; self.name; end
+      end
+    }
+
+    # Class body runs in new scope
+    compare %{
+      a = 1  
+      class Object
+	a = 2
+      end
+      a
+    }
+
+    # Constant lookup
+    compare_class %{
+      class A; Object; end
+    }
+
+    # Super classes
+    compare_class %{
+      class A; end; A.superclass
+    }
+
+    compare_class %{
+      class E < String 
+	def size; 10; end
+      end
+      [E.superclass, E.new("abc").size]
+    }
+
+    compare_class %{
+      a = String
+      class F < a; end; F.superclass
+    }
+
+return
+
+    # Failing tests
+
+    # can't define singleton on top-level object
+    compare %{
+      def test(); 1; end
+      test()
+    }
+
+    # Module.constants uses data from eval.c to decide what to return, but
+    # BCR can't set up this data to match MRI
+    compare %{
+      Module.constants.sort
+    }
+
+    # Module.nesting also uses eval.c data
+    compare %{
+      class Hi; Module.nesting; end
+    }
+
+  end
+
+
+  def testConsts
+    compare %{ DOES_NOT_EXIST }
+
+return
+    # failing tests
+
+    compare_class %{ A = 1; A }
+
+    compare_class %{
+      class A; B; end
+    }
+
+  end
+
+
+  def testCatch
+    compare %{ 
+      a = []
+      catch (:hi) do
+	a << 1
+	throw :hi
+	a << 2
+      end 
+      a << 3
+    }
+return # failing tests
+    # ensure not implemented yet
+    compare %{ 
+      a = []
+      catch (:hi) do
+	a << 1
+	begin
+	  throw :hi
+	ensure
+	  a << 2
+	end
+	a << 3
+      end 
+      a << 4
+    }
+  end
 
   def testStackAndJumps
+    # Ensure stack not hosed - the "a" should not be in play
+    # by the time we get to add "b" and "c"
+    compare %q{
+      a = "test"
+      def a.test
+	"a" + raise(Exception)
+      end
+      "b" + begin
+	    a.test
+	  rescue Exception
+	    "c"
+	  end
+    }
+
+
 return
+    # FIXME the stack is broken here - result should be "bd" but is "cd"
+    compare <<-EORUBY
+      "b" + begin
+	    "c" + raise(Exception)
+	  rescue Exception
+	    "d"
+	  end
+    EORUBY
+
     # The following (unnatural) code breaks the stack - 
     # result should be "ae", but in BCR the stack at the time of the first +
     # is "a", "b", "e", so the result is "be". The break should clear

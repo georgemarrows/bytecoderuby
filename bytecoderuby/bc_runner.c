@@ -4,6 +4,8 @@
 #include "bc_runner.h"
 #include "ruby_adds.h"
 
+#include <setjmp.h>
+
 /* useful Ruby objects, populated in Init_Runner */
 VALUE rb_eLocalJumpError, rb_eArgumentError;
 VALUE mBytecode;
@@ -15,7 +17,6 @@ ID to_ary;
 #define DEBUG_FLAG 0
 #define DEBUG if (DEBUG_FLAG)
 #define TRACE if (DEBUG_FLAG) printf
-
 
 /*********** Key structures ********************/ 
 typedef struct handler {
@@ -57,6 +58,11 @@ typedef struct closure {
 } Closure;
 
 
+/* random constants to distinguish between bytecode and C frames */
+#define FRAME_BYTECODE 0x1345234c
+#define FRAME_C        0x98a767f1
+
+
 typedef struct cframe {
   int type;
 
@@ -69,7 +75,6 @@ typedef struct cframe {
 } CFrame;
 
 
-/* FIXME move stack into frame? */
 typedef struct frame { 
   CFrame f;
 
@@ -85,42 +90,48 @@ typedef struct frame {
   /* the pc to restart when execution returns to this frame */
   int   *pc;
 
+  /* the stack entry to restart at when execution returns to this frame */
+  VALUE *sp;
+
   /* local variables (these run on beyond the end of the 
      frame struct) */
   VALUE locals; 
 
+  /* value stack runs on after the locals */
+
 } Frame;
 
-#define FRAME_BYTECODE 1
-#define FRAME_C        0
 
-/* frame stack */
-char *frame_stack;
-
+/* a thread - there's only one of these at the moment */
 struct thread {
+
+  /* storage for the thread's call frames */
+  char *frame_stack;
+
+  /* the current C frame - only valid if we're in the course 
+     of a call to a C method */
   CFrame *current_frame;
-  VALUE *tos;
+
+  /* flag to show whether bytecode is being run */
   int on_bc_stack;
+
 } thread;
 
-/* The size of a frame (in bytes) that can hold num_locals locals. 
-   -1 for the initial local declared in the Frame */
-#define FRAME_SIZE(num_locals) (sizeof(Frame) + sizeof(VALUE) * ((num_locals) -1)) 
 
 
-/* value stack */
-VALUE *stack;
+/* value stack manipulation */
 
-#define PUSH_STACK(val) *(tos++) = (val)
+#define PUSH_STACK(val) *(sp++) = (val)
 
-#define POP_STACK() (*(--tos))
+#define POP_STACK() (*(--sp))
 
 
-/* FIXME - inline this for handy performance boost */
+/******************************************************************
+ ** Method finding and creation 
+ ******************************************************************/
 static NODE* 
-bc_find_method( ID method_id, VALUE recv, int num_args, 
-		VALUE *argv) {
-  VALUE klass;
+bc_find_method( VALUE klass, ID method_id, int num_args, 
+		VALUE *argv, VALUE recv) {
   NODE *nd;
   
   /*
@@ -128,8 +139,6 @@ bc_find_method( ID method_id, VALUE recv, int num_args,
   Check argument counts for -2 methods (works OK for -1,0,1,..)
   */
   
-  klass = CLASS_OF(recv);
-
   /* FIXME sort out these last args to rb_get_method_body* */
   nd = rb_get_method_body_in_cache(klass, recv, method_id, num_args, argv, 1);
 
@@ -156,41 +165,100 @@ bc_define_method(VALUE klass, ID name, CodeBlock *method) {
 }
 
 
+/******************************************************************
+ ** Stack manipulation
+ ******************************************************************/
 
+/* returns the bottom of the stack for frame FRAME */
+static VALUE *
+frame_stack_start(Frame *frame) {
+  int num_locals = frame->codeblock->num_locals;
+  int sz         = sizeof(Frame) + sizeof(VALUE) * (num_locals-1);
+
+  return (VALUE *) ( ((char *) (frame)) + sz);
+}
 
 /*
   Frame maintenance
   Will need revisiting when frames are potentially heap-allocated
   (because captured in a closure).
  */
+// 
 static Frame *
-frame_alloc( Frame *current_frame, CodeBlock *codeblock, 
-	     int **pc, VALUE **locals) {
+frame_alloc_bc_on_bc( Frame *current_frame, CodeBlock *codeblock, 
+		      CodeBlock *block,     Frame *block_env,
+		      Frame *static_chain_prev_frame, VALUE recv,
+		      int **pc, VALUE **sp, VALUE *oldsp, VALUE **locals) {
 
   Frame *new_frame;
-  int sz;
 
   current_frame->pc = *pc;
+  current_frame->sp = *sp;
 
-  sz         = FRAME_SIZE(current_frame->codeblock->num_locals);
-  new_frame  = (Frame *) (((char *) current_frame) + sz);
-  new_frame->codeblock    = codeblock;
-  new_frame->f.prev_frame = current_frame;
-  new_frame->f.type       = FRAME_BYTECODE;
+  new_frame = (Frame *) oldsp;
+  new_frame->f.type                  = FRAME_BYTECODE;
+  new_frame->f.prev_frame            = current_frame;
+  new_frame->codeblock               = codeblock;
+  new_frame->f.block.codeblock       = block;      
+  new_frame->f.block.env             = block_env;
+  new_frame->static_chain_prev_frame = static_chain_prev_frame;
+  new_frame->self                    = recv;
 
-  *locals    = &(new_frame->locals);
   *pc        = codeblock->bytecode;
+  *sp        = frame_stack_start(new_frame);
+  *locals    = &(new_frame->locals);
 
   return new_frame;
 }
 
-void
-frame_reenter(Frame *frame, int **pc, VALUE **locals) {
-  *locals    = &(frame->locals);
+
+static void
+frame_reenter(Frame *frame, int **pc, VALUE **sp, VALUE **locals) {
   *pc        = frame->pc;
+  *sp        = frame->sp;
+  *locals    = &(frame->locals);
 }
 
-void
+
+static Frame *
+frame_alloc_bc_on_c( CFrame *current_frame, 
+		     CodeBlock *codeblock, VALUE recv,
+		     CodeBlock *block,     Frame *block_env,
+		     Frame *static_chain_prev_frame ) {
+
+  Frame  *frame  = (Frame *) (current_frame + 1); 
+
+  frame->f.type                  = FRAME_BYTECODE;
+  frame->f.prev_frame            = (Frame *) current_frame;
+  frame->codeblock               = codeblock;
+  frame->f.block.codeblock       = block;
+  frame->f.block.env             = block_env;
+  frame->static_chain_prev_frame = static_chain_prev_frame;
+  frame->self                    = recv;
+
+  frame->pc           = codeblock->bytecode;
+  frame->sp           = frame_stack_start(frame);
+
+  return frame;
+}
+
+ 
+static CFrame *
+frame_alloc_c_on_bc( Frame *current_frame,
+		     CodeBlock *block, Frame *block_env,
+		     VALUE *oldsp) {
+
+  CFrame *new_frame = (CFrame *) oldsp;
+  new_frame->type            = FRAME_C;     
+  new_frame->prev_frame      = current_frame;
+  new_frame->block.codeblock = block;      
+  new_frame->block.env       = block_env;
+  
+  return new_frame;
+}
+
+
+static void
 frame_setup_args(VALUE *locals, CodeBlock *codeblock, 
 		 int argc, VALUE *argv, int **pc) {
   int argc_errorp;
@@ -210,11 +278,11 @@ frame_setup_args(VALUE *locals, CodeBlock *codeblock,
 
   } else if (num_opt_args) {
 
-    argc_errorp = (argc < num_reqd_args) ||
-                  (argc > num_reqd_args + num_opt_args);
-    /* hack to get the correct error message */
-    if (argc_errorp && (argc > num_reqd_args + num_opt_args))
-      num_reqd_args += num_opt_args; 
+    int too_few  = argc < num_reqd_args;
+    int too_many = argc > num_reqd_args + num_opt_args;
+    argc_errorp = too_few || too_many;
+    /* adjustment to get correct error message */
+    if (too_many) num_reqd_args += num_opt_args; 
 
   }
 
@@ -270,7 +338,7 @@ frame_from_static_chain(Frame *frame, int count) {
 
 static Frame *
 frame_find_handler(Frame *current_frame,
-		   int **pc, VALUE **locals) {
+		   int **pc, VALUE **sp, VALUE **locals) {
   /* Find the handler nearest to CURRENT_FRAME, and return its 
      frame and the PC at which to start execution. Also set LOCALS
      correctly for the frame found. Returns 0 if no frame with
@@ -279,6 +347,10 @@ frame_find_handler(Frame *current_frame,
   Frame *frame;
   int offset_pc;
   Handler *handler;
+
+  /* save away in case handler is in current_frame */
+  current_frame->pc = *pc; 
+  current_frame->sp = *sp; 
 
   /* Run back through the frames looking for the
      first with a matching handler */
@@ -311,6 +383,7 @@ frame_find_handler(Frame *current_frame,
 	TRACE("MATCH - jumping to pc %d\n", handler->handler_pc);
 	*pc     = frame->codeblock->bytecode + handler->handler_pc;
 	*locals = &(frame->locals);
+	*sp     = frame->sp;
 	return frame;
       }
 
@@ -328,24 +401,31 @@ static char* inspect(VALUE s) {
 }
 
 
+/******************************************************************
+ ** Run bytecode
+ ******************************************************************/
 static VALUE 
 bc_run(Frame *current_frame) {
-  VALUE *locals, *tos = thread.tos;
+  VALUE *locals, *sp;
   int *pc;
   int i;
 
-  frame_reenter(current_frame, &pc, &locals);
+  frame_reenter(current_frame, &pc, &sp, &locals);
 
-  TRACE("About to run ..\n");
+  TRACE("About to run .. sp: %x\n", sp);
 
   for(;;) {
 
     DEBUG {
-      /* print stack */
-      VALUE *s;
-      if (tos < stack) printf("!!!! STACK UNDERFLOW !!!!\n");
-      for (s = stack; s < tos; s++) {
-	printf("stack %d\t%s\n", s -stack, inspect(*s));
+      VALUE *bos, *s;
+      bos = frame_stack_start(current_frame);
+      if (sp < bos) printf("!!!! STACK UNDERFLOW !!!!\n");
+      for (s = bos; s < sp; s++) {
+	//printf("stack %d\t%x\t%x\n", s - bos, s, *s);
+	/* FIXME stack elements as strings would be nice
+	   but bc_call isn't prepared for the inspect C call if
+	   inspect is implemented in bytecode */
+	printf("stack %d\t%s\n", s - bos, inspect(*s));
       }
     }
 
@@ -383,7 +463,7 @@ bc_run(Frame *current_frame) {
     case ST_LOC:                         
       {
 	int local_id = pc[1];
-	TRACE("ST_LOC\t%d\n", local_id);               
+	TRACE("ST_LOC\t%d\n", local_id);
 	locals[local_id] = POP_STACK();
         pc += 2;                         
         break;                           
@@ -402,7 +482,7 @@ bc_run(Frame *current_frame) {
     case DUP:                            
       {
         TRACE("DUP\n");                  
-        PUSH_STACK( tos[-1] );
+        PUSH_STACK( sp[-1] );
         pc += 1;
         break;
       }
@@ -417,75 +497,125 @@ bc_run(Frame *current_frame) {
       {
         VALUE tmp;
         TRACE("SWAP\n");
-	tmp     = tos[-1];
-	tos[-1] = tos[-2];
-	tos[-2] = tmp;
+	tmp     = sp[-1];
+	sp[-1] = sp[-2];
+	sp[-2] = tmp;
         pc += 1;
         break;
+      }
+    case RUN:
+      {
+	CodeBlock *codeblock = (CodeBlock *) pc[1];
+	VALUE recv = POP_STACK();
+
+        TRACE("RUN <code>\n");
+	pc += 2;
+
+	current_frame = frame_alloc_bc_on_bc(current_frame, codeblock, 
+					     0, 0,
+					     0, recv,
+					     &pc, &sp, sp, &locals);
+
+	break;
       }
     case CALL:
       {
         int method_id = pc[1];
-        int argc      = pc[2]; 
-	CodeBlock *block = (CodeBlock *) pc[3];
+        int argc      = pc[2];
+	int superp    = pc[3];
+	CodeBlock *block = (CodeBlock *) pc[4];
 
-	VALUE recv, *argv, result;
+	VALUE recv, *argv, result, *oldsp;
 	NODE *nd;
 
-        TRACE("CALL %s %d\n", rb_id2name(method_id), argc);
-        pc   += 4;
+        TRACE( "CALL %s %d %s\n", 
+	       rb_id2name(method_id), argc, 
+	       superp ? "super" : "normal");
+        pc   += 5;
+
+	oldsp = sp;
 
 	if (argc >= 0) {
 	  /* normal args only */
-	  tos  -= argc + 1;
-	  recv =  *tos;
-	  argv =  tos + 1;
+	  sp  -= argc + 1;
+	  recv =  *sp;
+	  argv =  sp + 1;
 	} else {
 	  /* normal + scatter args - glue normal args to array */
 	  VALUE ary;
 	  int num_args, ary_len;
-	  ary      = tos[-1];
+	  ary      = sp[-1];
 	  ary_len  = RARRAY(ary)->len;
 	  num_args = -(argc + 1);
-	  tos     -= num_args + 2;  /* +1 recv, +1 scatter ary */
-	  recv     = *tos;
+	  sp     -= num_args + 2;  /* +1 recv, +1 scatter ary */
+	  recv     = *sp;
 	  argc     = num_args + ary_len;
 	  argv     = ALLOC_N(VALUE, argc);
-	  MEMCPY(argv,            tos+1,            VALUE, num_args);
+	  MEMCPY(argv,            sp+1,            VALUE, num_args);
 	  MEMCPY(argv + num_args, RARRAY(ary)->ptr, VALUE, ary_len);
 	}
 
-	nd = bc_find_method(method_id, recv, argc, argv);
+	{
+	  VALUE klass = CLASS_OF(recv);
+	  if (superp) klass = RCLASS(klass)->super;
+	  nd = bc_find_method(klass, method_id, argc, argv, recv);
+	}
 
 	switch nd_type(nd) {
 	case NODE_CFUNC: { 
-	  CFrame *new_frame;
-	  int sz;
+	  VALUE retval;
+	  struct tag _tag;
+	  int state;
+	  Frame *frame;
 
-	  sz         = FRAME_SIZE(current_frame->codeblock->num_locals);
-	  new_frame  = (CFrame *) (((char *) current_frame) + sz);
-	  new_frame->block.codeblock = block;      
-	  new_frame->block.env       = current_frame;
-	  new_frame->prev_frame      = current_frame;
-	  new_frame->type            = FRAME_C;
-
-	  thread.tos           = tos;
-
+	  CFrame *new_frame = frame_alloc_c_on_bc( current_frame,
+						   block,
+						   current_frame,
+						   oldsp );
 	  thread.current_frame = new_frame;
-	  PUSH_STACK(call_cfunc(nd->nd_cfnc, recv, 
-				nd->nd_argc, argc, argv));
-	  break;  
+
+	  /* protect C call with MRI tags so that we catch exceptions */
+	  /* FIXME there are more efficient ways to do this than 
+	     setting up tags & jump bufs for every C call */
+	  bc_push_tag(&_tag);
+	  state = setjmp(_tag.buf);
+	  if (state == 0) {
+	    retval = call_cfunc(nd->nd_cfnc, recv, 
+				nd->nd_argc, argc, argv);
+	    PUSH_STACK(retval);
+	  }
+	  bc_pop_tag(&_tag);
+	  
+	  /* no exception */
+	  if (!state) break;
+
+	  /* FIXME this code currently assumes exceptions only -
+	     could also be throws, breaks etc */
+
+	  /* try and find a handler for the exception */
+	  frame = frame_find_handler(current_frame,
+				     &pc, &sp, &locals);
+	  
+	  if (frame) {
+	    PUSH_STACK(bc_current_exception());
+	    current_frame = frame;
+	    goto bytecode_dispatch;
+	  } else {
+	    TRACE("reraising C exception\n");
+	    bc_jump_tag(state);
+	  }
+	  
+	  /* not reached */
 	}
 	case NODE_BFUNC: {
 	  /* bytecode method - need to interpret it */
 	  CodeBlock *codeblock = (CodeBlock *) nd->nd_cfnc;
 	  Frame *new_frame;
 
-	  new_frame = frame_alloc(current_frame, codeblock, &pc, &locals);
-	  new_frame->f.block.codeblock       = block;      
-	  new_frame->f.block.env             = current_frame;
-	  new_frame->static_chain_prev_frame = 0;
-	  new_frame->self                    = recv;
+	  new_frame = frame_alloc_bc_on_bc(current_frame, codeblock, 
+					   block, current_frame,
+					   0, recv,
+					   &pc, &sp, oldsp, &locals);
 
 	  DEBUG {
             for (i=0; i < codeblock->num_locals; i++)
@@ -503,13 +633,7 @@ bc_run(Frame *current_frame) {
 	  break;
 	}
 	default:
-	  /*
-	    Don't know how to deal with any others .. pass back to eval.c 
-	    The method'll be in the cache so won't be too expensive to look up
-	    FIXME not implemented
-	  */
-	  /* rb_call( klass, recv, method_id, argc, argv, 1); */
-	  return Qnil;
+	  rb_bug("Can't call functions that aren't C or bytecode");
 	  break;
 	}
 
@@ -519,6 +643,7 @@ bc_run(Frame *current_frame) {
       {
 	int count = pc[1];
 	Frame * frame;
+	VALUE return_val;
 
 	TRACE("RETURN %d\n", count);
 
@@ -530,10 +655,11 @@ bc_run(Frame *current_frame) {
 	  return POP_STACK();
 	}
 
-	/* return to previous frame - result should be on top 
-	   of the stack - just where we need it */
+	/* return to previous frame */
+	return_val = sp[-1]; 
 	current_frame = frame;
-	frame_reenter(current_frame, &pc, &locals);
+	frame_reenter(current_frame, &pc, &sp, &locals);
+	PUSH_STACK(return_val);
 
 	break;
       }
@@ -573,7 +699,7 @@ bc_run(Frame *current_frame) {
 	int count = pc[2];
 	Frame *new_frame, *block_owner_frame, *static_chain_prev_frame;
 
-	VALUE *argv;
+	VALUE *argv, *oldsp;
 	NODE *nd;
 
         TRACE("YIELD %d\n", argc);
@@ -589,16 +715,16 @@ bc_run(Frame *current_frame) {
 	  rb_raise(rb_eLocalJumpError, "no block given");
 	}
 
-	new_frame = frame_alloc(current_frame, codeblock, &pc, &locals);
+	oldsp = sp;
+	sp  -= argc; 
+	argv = sp;   
 
-	/* blocks don't have blocks themselves */
-	new_frame->f.block.codeblock       = 0; 
-	new_frame->f.block.env             = 0;
-	new_frame->static_chain_prev_frame = static_chain_prev_frame;
-	new_frame->self                    = static_chain_prev_frame->self;
+	new_frame = frame_alloc_bc_on_bc(current_frame, codeblock, 
+					 0, 0,
+					 static_chain_prev_frame,
+					 static_chain_prev_frame->self,
+					 &pc, &sp, oldsp, &locals);
 
-	tos  -= argc;
-	argv = tos;
 	for (i=0; i < argc; i++)
 	  locals[i] = argv[i];
 	  
@@ -683,19 +809,24 @@ bc_run(Frame *current_frame) {
       }
     case BREAK:
       {
+	VALUE return_val;
         TRACE("BREAK\n");
 	
 	/* Jump back to the lexical enclosing code */
 	/* FIXME run protect blocks */
 	/* FIXME check static_chain_prev_frame is on the call stack - needed for procs */
+	/* FIXME doesn't unroll C stack in [1,2].each {|a| break} */
+	return_val = sp[-1]; 
+
 	current_frame = current_frame->static_chain_prev_frame;	
 
 	/* FIXME correct message? */
 	if (!current_frame)
 	  rb_raise(rb_eLocalJumpError, "break called out of block");
 
-	frame_reenter(current_frame, &pc, &locals);
+	frame_reenter(current_frame, &pc, &sp, &locals);
 
+	PUSH_STACK(return_val);
         break;
       }
     case LD_IVAR:
@@ -716,6 +847,18 @@ bc_run(Frame *current_frame) {
 	TRACE("ST_IVAR %s\n", rb_id2name(var_id));
 
 	rb_ivar_set(current_frame->self, var_id, POP_STACK());
+
+	pc += 2;
+	break;
+      }
+    case LD_GVAR:
+      {
+        ID var_id = (ID) pc[1];	
+
+	TRACE("LD_GVAR %s\n", rb_id2name(var_id));
+
+	rb_bug("ld_gvar not yet implemented");
+	/*	PUSH_STACK(rb_gvar_get(var_id)); */
 
 	pc += 2;
 	break;
@@ -741,44 +884,6 @@ bc_run(Frame *current_frame) {
 	pc += 1;
 	break;
       }
-    case ST_SELF:
-      {
-	/* FIXME - only needed to allow our current crappy class decl to work */
-	TRACE("ST_SELF\n");
-	current_frame->self = POP_STACK();
-	pc += 1;
-	break;
-      }
-    case RAISE:
-      {
-	VALUE excep_class;
-	Frame *frame;
-
-	TRACE("RAISE\n");
-
-	excep_class = POP_STACK();
-        Check_Type(excep_class, T_CLASS);	
-
-	current_frame->pc = pc;
-	frame = frame_find_handler(current_frame,
-				   &pc, &locals);
-
-	if (frame) {
-
-	  PUSH_STACK(rb_exc_new2(excep_class, inspect(excep_class)));
-	  // FIXME tos    = 
-	  // FIXME set current exception?
-	  current_frame = frame;
-	  goto bytecode_dispatch;
-
-	} else {
-
-	  // FIXME set current exception?
-	  TRACE("raise: raising C exception %s\n", inspect(excep_class));
-	  rb_raise(excep_class, inspect(excep_class));  /* no messages allowed */
-	}
-
-      }
     case REHANDLE:
       {
 	VALUE exception;
@@ -788,22 +893,18 @@ bc_run(Frame *current_frame) {
 
 	exception = POP_STACK();
 
-	current_frame->pc = pc;
 	frame = frame_find_handler(current_frame,
-				   &pc, &locals);
+				   &pc, &sp, &locals);
 
 	if (frame) {
 
 	  PUSH_STACK(exception);
-	  // FIXME tos    = 
-	  // FIXME set current exception?
 	  current_frame = frame;
 	  goto bytecode_dispatch;
 
 	} else {
 
-	  // FIXME set current exception?
-	  TRACE("rehandle: reraising C exception %s\n", inspect(exception));
+	  TRACE("rehandle: reraising C exception\n");
 	  rb_exc_raise(exception);
 	}
 
@@ -821,6 +922,9 @@ bc_run(Frame *current_frame) {
 }
 
 
+/******************************************************************
+ ** Compilation
+ ******************************************************************/
 static Handler *
 bc_compile_handlers(VALUE handlers) {
   VALUE handler_ary, handler;
@@ -830,13 +934,12 @@ bc_compile_handlers(VALUE handlers) {
   handler_ary = rb_iv_get(handlers, "@handlers");
   size        = RARRAY(handler_ary)->len;
 
-  if (!size) return 0;
+  if (!size) return 0;   /* no handlers */
 
   result = ALLOC_N(Handler, size + 1);  /* +1 for sentinel handler at end */
 
   for ( i=0; i<size; i++ ) {
     handler = rb_ary_entry(handler_ary, (long) i);
-    // printf("\nCCC handler %s", inspect(handler));
     result[i].start_pc   = FIX2INT(rb_iv_get(handler, "@start_pc"));
     result[i].end_pc     = FIX2INT(rb_iv_get(handler, "@end_pc"));
     result[i].handler_pc = FIX2INT(rb_iv_get(handler, "@handler_pc"));
@@ -848,9 +951,14 @@ bc_compile_handlers(VALUE handlers) {
 }
 
 
+/* forward decl for recursive functions */
 static CodeBlock *
-codeblock_from_writer(VALUE writer) {
+bc_compile_codeblock(VALUE writer);
 
+
+static int *
+bc_compile_bytecode(VALUE writer) {
+  
   VALUE bc_ary, val;
   int i, size ;
   int *bc;
@@ -861,35 +969,35 @@ codeblock_from_writer(VALUE writer) {
   bc_ary = rb_iv_get(writer, "@result");
   size   = RARRAY(bc_ary)->len;
 
-  /*  TRACE("Size is %d\n", size); */
+  //  TRACE("Size is %d\n", size);
   bc  = ALLOC_N(int, size);
   
-  /*  TRACE("Bytecode is at: %x\n",bc); */
+  //  TRACE("Bytecode is at: %x\n",bc);
   
   for (i=0; i < size; i++) {
-    /* TRACE("Entry %d: ", i); */
+    //  TRACE("Entry %d: ", i);
     val = rb_ary_entry(bc_ary, (long) i);
 
     if (FIXNUM_P(val)) {
       
-      /* TRACE("fixnum %d\n", FIX2INT(val)); */
+      //  TRACE("fixnum %d\n", FIX2INT(val));
       bc[i] = FIX2INT(val);
       
     } else if (SYMBOL_P(val)) {
       
-      /* TRACE("symbol %d\n", val); */
+      //  TRACE("symbol %d\n", val);
       bc[i] = SYM2ID(val);
 
     } else if (rb_obj_is_kind_of(val, cWriter)) {
 
-      /* TRACE("Writer\n"); */ 
-      bc[i] = (int) codeblock_from_writer(val);
+      //  TRACE("Writer\n"); 
+      bc[i] = (int) bc_compile_codeblock(val);
 
     } else {
 
       /* Otherwise val is an immediate value wrapped in an array
       Unwrap it */
-      /* TRACE("Unwrapping immediate\n"); */
+      //  TRACE("Unwrapping immediate\n");
       bc[i] = (int) rb_ary_entry(val, (long) 0);
 
     }
@@ -900,54 +1008,64 @@ codeblock_from_writer(VALUE writer) {
     rb_raise(rb_eStandardError, "bytecode doesn't end in RETURN");
   }
 
-  {
-    CodeBlock *codeblock;
-    VALUE opt_args_ary;
-    int num_offsets;
+  return bc;
 
-    codeblock = ALLOC(CodeBlock);
-    codeblock->bytecode     = bc;
-    codeblock->num_locals   = FIX2INT(rb_iv_get(writer, "@num_locals"));
-    codeblock->num_args     = FIX2INT(rb_iv_get(writer, "@num_args"));
+}
 
-    /* FIXME Copy @opt_args to C array, if @opt_args isnt nil.
-       Zeroth elem is the number of opt args.
-       Element N>0 is the PC offset to jump to to skip
-       initialisation for the first N-1 args */
-    opt_args_ary = rb_iv_get(writer, "@opt_args_jump_points");
-    if (opt_args_ary == Qnil) {
 
-      codeblock->num_opt_args = 0;
-      codeblock->opt_args     = (unsigned char*) 0;
+static void
+bc_compile_args(VALUE writer, CodeBlock *codeblock) {
 
-    } else {
-
-      num_offsets = RARRAY(opt_args_ary)->len;
-      codeblock->num_opt_args = num_offsets - 1;
-      codeblock->opt_args     = ALLOC_N(unsigned char, num_offsets);
-
-      for (i=0; i < num_offsets; i++) {
-	val = rb_ary_entry(opt_args_ary, (long) i);
-	codeblock->opt_args[i] = FIX2INT(val);
-      }
-
+  VALUE opt_args_ary, val;
+  int i, num_offsets;
+  
+  codeblock->num_locals   = FIX2INT(rb_iv_get(writer, "@num_locals"));
+  codeblock->num_args     = FIX2INT(rb_iv_get(writer, "@num_args"));
+  
+  /* Copy @opt_args to C array, if @opt_args isnt nil.
+     Element N>0 is the PC offset to jump to to skip
+     initialisation for the first N-1 args */
+  opt_args_ary = rb_iv_get(writer, "@opt_args_jump_points");
+  if (opt_args_ary == Qnil) {
+    
+    codeblock->num_opt_args = 0;
+    codeblock->opt_args     = (unsigned char*) 0;
+    
+  } else {
+    
+    num_offsets = RARRAY(opt_args_ary)->len;
+    codeblock->num_opt_args = num_offsets - 1;
+    codeblock->opt_args     = ALLOC_N(unsigned char, num_offsets);
+    
+    for (i=0; i < num_offsets; i++) {
+      val = rb_ary_entry(opt_args_ary, (long) i);
+      codeblock->opt_args[i] = FIX2INT(val);
     }
-
-    if (RTEST(rb_iv_get(writer, "@rest_arg")))
-      codeblock->num_opt_args = -(codeblock->num_opt_args + 1);
-
-    codeblock->handlers = bc_compile_handlers(rb_iv_get(writer, "@handlers"));
-
-    /* TRACE("DONE\n"); */
-    return codeblock;
+    
   }
+  
+  if (RTEST(rb_iv_get(writer, "@rest_arg")))
+    codeblock->num_opt_args = -(codeblock->num_opt_args + 1);
+}
+
+
+static CodeBlock *
+bc_compile_codeblock(VALUE writer) {
+  CodeBlock *codeblock = ALLOC(CodeBlock);
+
+  codeblock->bytecode = bc_compile_bytecode(writer);
+  codeblock->handlers = bc_compile_handlers(rb_iv_get(writer, "@handlers"));
+
+  bc_compile_args(writer, codeblock);
+  
+  return codeblock;
 }
 
 
 static VALUE
 bc_define_bytecode_method0(VALUE klass, VALUE name_as_sym, VALUE writer)
 {
-  CodeBlock *cb = codeblock_from_writer(writer);
+  CodeBlock *cb = bc_compile_codeblock(writer);
   NODE *node    = rb_node_newnode(NODE_BFUNC, cb, cb->num_args, 0); 
 
   rb_add_method( klass, 
@@ -959,8 +1077,9 @@ bc_define_bytecode_method0(VALUE klass, VALUE name_as_sym, VALUE writer)
 }
 
 
-extern VALUE ruby_top_self; /* from object.c */
-
+/******************************************************************
+ ** Functions implementing MRI <-> BCR interface
+ ******************************************************************/
 static int
 bc_block_given_p() {
 
@@ -975,7 +1094,7 @@ bc_block_given_p() {
   cframe = thread.current_frame;
 
   if (cframe->type != FRAME_C) {
-      rb_raise(rb_eNameError, "bc_block_given_p but frame not C");
+    rb_bug("bc_block_given_p but frame not C");
   }
   
   if (!cframe->block.codeblock) {
@@ -994,11 +1113,6 @@ bc_yield( VALUE val ) {
   CodeBlock *codeblock;
   Frame *static_chain_prev_frame;
 
-  /*
-  if (!bc_block_given_p()) 
-    return Qundef;
-  */
-
   if (!thread.on_bc_stack) {
     return Qundef; 
   }
@@ -1008,7 +1122,7 @@ bc_yield( VALUE val ) {
   cframe = thread.current_frame;
 
   if (cframe->type != FRAME_C) {
-      rb_raise(rb_eNameError, "bc_yield but frame not C");
+      rb_bug("bc_yield but frame not C");
   }
   
   if (!cframe->block.codeblock) {
@@ -1018,15 +1132,12 @@ bc_yield( VALUE val ) {
   codeblock               = cframe->block.codeblock;
   static_chain_prev_frame = cframe->block.env;
 
-  frame = (Frame *) (((char *) cframe) + sizeof(CFrame));
-  frame->f.type                  = FRAME_BYTECODE;
-  frame->f.prev_frame            = (Frame *) cframe;
-  frame->f.block.codeblock       = 0; 
-  frame->f.block.env             = 0;
-  frame->static_chain_prev_frame = static_chain_prev_frame;
-  frame->self                    = static_chain_prev_frame->self;
-  frame->pc                      = codeblock->bytecode;
-  frame->codeblock               = codeblock;
+  frame = frame_alloc_bc_on_c( cframe,
+			       codeblock, 
+			       static_chain_prev_frame->self,
+			       0, 0,
+			       static_chain_prev_frame);  
+
   frame->locals                  = val;
 
   return bc_run(frame);
@@ -1044,20 +1155,16 @@ bc_call(CodeBlock *codeblock, VALUE recv,
   cframe = thread.current_frame;
 
   if (cframe->type != FRAME_C) {
-      rb_raise(rb_eNameError, "bc_call but frame not C");
+      rb_bug("bc_call but frame not C");
   }
 
-  frame = (Frame *) (((char *) cframe) + sizeof(CFrame));
-  frame->f.prev_frame = (Frame *) cframe;
-  frame->f.type       = FRAME_BYTECODE;
-  frame->self         = recv;
-  frame->pc           = codeblock->bytecode;
-  frame->codeblock    = codeblock;
+  frame = frame_alloc_bc_on_c(cframe, codeblock, recv, 0, 0, 0);  
 
   MEMCPY(&(frame->locals), argv, VALUE, argc_top_level);
 
   return bc_run(frame);
 }
+
 
 VALUE
 bc_stop(VALUE val) {
@@ -1066,28 +1173,24 @@ bc_stop(VALUE val) {
   return Qnil;
 }
 
+
+extern VALUE ruby_top_self; /* from object.c */
+
 static VALUE
 bc_run_from_writer(VALUE runner, VALUE writer) {
-  CodeBlock *cb;
+  CodeBlock *codeblock;
   CFrame *cframe;
   Frame *frame;
   VALUE recv    = ruby_top_self; 
 
-  thread.tos = stack;
-
-  cframe = (CFrame *) frame_stack;
+  cframe = (CFrame *) thread.frame_stack;
   cframe->type = FRAME_C;
 
   thread.current_frame = cframe;
 
-  cb = codeblock_from_writer(writer);
+  codeblock = bc_compile_codeblock(writer);
 
-  frame = (Frame *) (((char *) frame_stack) + sizeof(CFrame));
-  frame->f.prev_frame = (Frame *) cframe;
-  frame->f.type       = FRAME_BYTECODE;
-  frame->self         = recv;
-  frame->pc           = cb->bytecode;
-  frame->codeblock    = cb;
+  frame = frame_alloc_bc_on_c(cframe, codeblock, recv, 0, 0, 0);  
 
   TRACE("CCC entering bc\n");
   thread.on_bc_stack = 1;
@@ -1096,10 +1199,93 @@ bc_run_from_writer(VALUE runner, VALUE writer) {
 }
 
 
+/******************************************************************
+ ** Constant and class helper functions
+ ******************************************************************/
+static VALUE
+bc_bcr_const_get( VALUE owner_object, 
+		  VALUE name_as_sym ) {
+
+  ID name_as_id = SYM2ID(name_as_sym);
+  VALUE owner_klass;
+
+  if ( (TYPE(owner_object) == T_CLASS ) || 
+       (TYPE(owner_object) == T_MODULE)    ) {
+    owner_klass = owner_object;
+  } else {
+    owner_klass = rb_obj_class(owner_object);
+  }
+
+  return rb_const_get(owner_klass, name_as_id);
+  
+}
+
+
+static VALUE
+bc_get_or_make_class( VALUE owner_object, 
+		      VALUE name_as_sym, 
+		      VALUE zsuper         ) {
+
+  VALUE klass = 0;
+  VALUE owner_klass;
+  ID name_as_id = SYM2ID(name_as_sym);
+
+  /* 
+     In TOPLEVEL_BINDING, class can be run with owner_object 
+     as the 'main' object; in nested classes, owner_object will
+     be the surrounding class. In either case, get the class to
+     create the object under.
+  */
+  if ( (TYPE(owner_object) == T_CLASS ) || 
+       (TYPE(owner_object) == T_MODULE)    ) {
+    owner_klass = owner_object;
+  } else {
+    owner_klass = rb_obj_class(owner_object);
+  }
+
+  if (rb_const_defined_at(owner_klass, name_as_id)) {
+    klass = rb_const_get(owner_klass, name_as_id);
+  }
+
+  if (klass) {
+    if (TYPE(klass) != T_CLASS) {
+      rb_raise(rb_eTypeError, "%s is not a class",
+	       rb_id2name(name_as_id));
+    }
+    /*
+    if (zsuper) {
+      tmp = rb_class_real(RCLASS(klass)->super);
+      if (tmp != super) {
+	goto override_class;
+      }
+    }
+    */
+    if (rb_safe_level() >= 4) {
+      rb_raise(rb_eSecurityError, "extending class prohibited");
+    }
+    rb_clear_cache();
+  }
+  else {
+  override_class:
+    if (NIL_P(zsuper)) zsuper = rb_cObject;
+    klass = rb_define_class_under(owner_klass, 
+				  rb_id2name(name_as_id),
+				  zsuper );
+
+  }
+
+  return klass;
+  
+}
+
+
+
+/******************************************************************
+ ** Initialisation
+ ******************************************************************/
 void Init_Runner() { 
 
-  stack                = ALLOC_N(VALUE, 100);
-  frame_stack          = ALLOC_N(char, 10000);
+  thread.frame_stack          = ALLOC_N(char, 10000);
 
   mBytecode = rb_define_module("Bytecode");
 
@@ -1123,6 +1309,13 @@ void Init_Runner() {
 
   rb_define_method( rb_cClass, "define_bytecode_method0", 
   		    bc_define_bytecode_method0, 2);
+
+  /* new class defintion method */
+  rb_define_method( rb_cObject, "get_or_make_class",
+		    bc_get_or_make_class, 2);
+
+  rb_define_method( rb_cObject, "bcr_const_get",
+		    bc_bcr_const_get, 1);
 
   to_ary = rb_intern("to_ary");
 }
