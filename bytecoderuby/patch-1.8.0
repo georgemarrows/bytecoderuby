@@ -1,0 +1,280 @@
+--- /dos2/George/ruby/build/ruby-1.8.0/eval.c	Mon Aug  4 07:28:50 2003
++++ /dos2/George/ruby/build/ruby-1.8.0.hack/eval.c	Sun Nov 16 14:42:38 2003
+@@ -339,7 +339,7 @@
+     return body;
+ }
+ 
+-static NODE*
++NODE*
+ rb_get_method_body(klassp, idp, noexp)
+     VALUE *klassp;
+     ID *idp;
+@@ -837,16 +837,6 @@
+     ruby_iter = _iter.prev;		\
+ } while (0)
+ 
+-struct tag {
+-    jmp_buf buf;
+-    struct FRAME *frame;
+-    struct iter *iter;
+-    ID tag;
+-    VALUE retval;
+-    struct SCOPE *scope;
+-    int dst;
+-    struct tag *prev;
+-};
+ static struct tag *prot_tag;
+ 
+ #define PUSH_TAG(ptag) do {		\
+@@ -3878,6 +3868,11 @@
+ 	mesg = rb_exc_new(rb_eRuntimeError, 0, 0);
+     }
+ 
++    /* mesg is fixed now so tell BCR */
++    if ((tag == TAG_RAISE) && (bcr_hooks.raise)) {
++      bcr_hooks.raise(mesg);
++    }
++
+     ruby_set_current_source();
+     if (ruby_sourcefile && !NIL_P(mesg)) {
+ 	at = get_backtrace(mesg);
+@@ -4010,6 +4005,7 @@
+ {
+     if (ruby_frame->iter && ruby_block)
+ 	return Qtrue;
++    if (bcr_hooks.block_given_p && bcr_hooks.block_given_p()) return Qtrue;
+     return Qfalse;
+ }
+ 
+@@ -4044,6 +4040,14 @@
+     int state;
+     static unsigned serial = 1;
+ 
++    if (bcr_hooks.yield) {
++      result = bcr_hooks.yield(val);
++      if (result != Qundef) { /* Qundef signals no-go for BCR */
++	return result;
++      }
++      result = Qnil;
++    }
++
+     if (!rb_block_given_p()) {
+ 	localjump_error("no block given", Qnil, 0);
+     }
+@@ -4752,7 +4756,7 @@
+     return rb_funcall2(obj, missing, argc+1, nargv);
+ }
+ 
+-static inline VALUE
++inline VALUE
+ call_cfunc(func, recv, len, argc, argv)
+     VALUE (*func)();
+     VALUE recv;
+@@ -4908,6 +4912,16 @@
+ 	}
+ 	break;
+ 
++     case NODE_BFUNC:
++       {
++         if (!bcr_hooks.call) {
++           rb_raise(rb_eStandardError, "bytecode extensions not loaded");
++         }
++	 
++         result = (*bcr_hooks.call)(body->nd_cfnc, recv, argc, argv);
++       }
++       break;
++
+ 	/* for attr get/set */
+       case NODE_IVAR:
+ 	if (argc != 0) {
+@@ -5069,6 +5083,39 @@
+     return result;
+ }
+ 
++
++NODE *
++rb_get_method_body_in_cache(klass, recv, mid, argc, argv, noexp)
++    VALUE klass, recv;
++    ID    mid;
++    int argc;			/* OK */
++    VALUE *argv;		/* OK */
++    int * noexp;
++{
++    struct cache_entry *ent;
++    NODE *body;
++
++    if (!klass) {
++	rb_raise(rb_eNotImpError, "method call on terminated object");
++    }
++
++    /* is it in the method cache? */
++    ent = cache + EXPR1(klass, mid);
++    if (ent->mid == mid && ent->klass == klass) {
++      *noexp = ent->noex;
++      body = ent->method;
++      if (body) {
++	return body;
++      } else {
++	return (NODE *) method_missing(recv, mid, argc, argv, 0);
++      }
++    } else {
++      /* not found */
++      return 0;
++    }
++}
++
++
+ static VALUE
+ rb_call(klass, recv, mid, argc, argv, scope)
+     VALUE klass, recv;
+@@ -6893,6 +6940,11 @@
+     struct BLOCK *data, *p;
+     struct RVarmap *vars;
+ 
++    if (bcr_hooks.proc_new) {  
++      if ((proc = bcr_hooks.proc_new(klass)) != Qundef)
++	return proc;
++    }
++
+     if (!rb_block_given_p() && !rb_f_block_given_p()) {
+ 	rb_raise(rb_eArgError, "tried to create Proc object without a block");
+     }
+@@ -6998,6 +7050,12 @@
+     struct RVarmap * volatile old_dvars = ruby_dyna_vars;
+     volatile int pcall;
+ 
++    if (bcr_hooks.proc_call) {  
++      VALUE val;
++      if ((val = bcr_hooks.proc_call(proc, args)) != Qundef)
++	return val;
++    }
++
+     if (rb_block_given_p() && ruby_frame->last_func) {
+ 	rb_warning("block for %s#%s is useless",
+ 		   rb_obj_classname(proc),
+@@ -10053,6 +10111,8 @@
+     /* allocate main thread */
+     main_thread = rb_thread_alloc(rb_cThread);
+     curr_thread = main_thread->prev = main_thread->next = main_thread;
++
++    memset(&bcr_hooks, 0, sizeof(bcr_hooks));
+ }
+ 
+ static VALUE
+@@ -10106,6 +10166,10 @@
+     rb_scan_args(argc, argv, "11", &tag, &value);
+     t = rb_to_id(tag);
+ 
++    if (bcr_hooks.throw) {
++      bcr_hooks.throw(t, value);
++    }
++
+     while (tt) {
+ 	if (tt->tag == t) {
+ 	    tt->dst = t;
+@@ -10158,3 +10222,42 @@
+ 	tt = tt->prev;
+     }
+ }
++
++void
++bc_push_tag(struct tag *_tag) {
++
++  _tag->retval = Qnil;		     
++  _tag->frame = ruby_frame;		
++  _tag->iter = ruby_iter;		
++  _tag->prev = prot_tag;		
++  _tag->scope = ruby_scope;		
++  _tag->dst = 0;			
++
++  prot_tag  = _tag;
++}
++
++
++void 
++bc_pop_tag(struct tag *_tag) {
++
++  if (_tag->prev) {
++    /* Pass back the return value along the tag chain. 
++       Only used by BCR for throw/catch */
++    _tag->prev->retval = _tag->retval;
++  }
++
++  prot_tag = _tag->prev;
++}
++
++
++void 
++bc_jump_tag(int state) {
++  JUMP_TAG(state);
++}
++
++
++VALUE
++bc_current_exception() {
++  return ruby_errinfo;
++}
++
+--- /dos2/George/ruby/build/ruby-1.8.0/node.h	Wed Jul 16 09:11:26 2003
++++ /dos2/George/ruby/build/ruby-1.8.0.hack/node.h	Thu Aug  7 23:02:28 2003
+@@ -125,6 +125,7 @@
+     NODE_IFUNC,
+     NODE_DSYM,
+     NODE_ATTRASGN,
++    NODE_BFUNC,
+     NODE_LAST
+ };
+ 
+--- /dos2/George/ruby/build/ruby-1.8.0/ruby.h	Tue Jul 29 12:45:12 2003
++++ /dos2/George/ruby/build/ruby-1.8.0.hack/ruby.h	Sun Nov 16 13:48:16 2003
+@@ -670,6 +670,36 @@
+ static char *dln_libs_to_be_linked[] = { EXTLIB, 0 };
+ #endif
+ 
++/* Hooks for ByteCodeRuby */
++ typedef VALUE (*BCRCall) _(( void *code, VALUE recv, int argc, VALUE *argv ));
++
++struct bcr_hooks {
++  BCRCall call;
++  VALUE (*yield)         _(( VALUE val ));
++  int   (*block_given_p) _(( void ));
++  VALUE (*proc_new)      _(( VALUE klass ));
++  VALUE (*proc_call)     _(( VALUE proc, VALUE args ));
++  void  (*gc)            _(( void ));
++  void  (*gc_mark_block) _(( void *code ));
++  void  (*raise)         _(( VALUE mesg ));
++  void  (*throw)         _(( ID tag, VALUE value ));
++} bcr_hooks;
++
++#include <setjmp.h>
++
++struct tag {
++  jmp_buf buf;
++  struct FRAME *frame;
++  struct iter *iter;
++  ID tag;
++  VALUE retval;
++  struct SCOPE *scope;
++  int dst;
++  struct tag *prev;
++};
++
++
++
+ #if defined(__cplusplus)
+ }  /* extern "C" { */
+ #endif
+--- /dos2/George/ruby/build/ruby-1.8.0/gc.c	Sat Aug  2 08:45:56 2003
++++ /dos2/George/ruby/build/ruby-1.8.0.hack/gc.c	Thu Aug  7 23:02:28 2003
+@@ -758,6 +758,11 @@
+ 	    ptr = (VALUE)obj->as.node.u2.node;
+ 	    goto again;
+ 
++	  case NODE_BFUNC:
++	    if (bcr_hooks.gc_mark_block) 
++	      bcr_hooks.gc_mark_block(obj->as.node.nd_cfnc);
++	    goto again;
++
+ 	  case NODE_ZARRAY:	/* - */
+ 	  case NODE_ZSUPER:
+ 	  case NODE_CFUNC:

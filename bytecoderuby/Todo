@@ -1,121 +1,180 @@
 Ruby language support
 =====================
-- local variables
-- frames
+- literals
+	- integers
+	- floats
+	- true / false
+	- strings
+	- arrays
+	- hashes
+	- ranges
+	- regexps
+* control flow
+	- not
+	- and & or
+	- if
+	- unless
+	- while
+	- until
+	- case
+	* range flip-flops
+* misc
+	- multiple assignment
+	* #{} in strings and regexps
+	* BEGIN {} & END {}
+	* __LINE__, __FILE__
 - methods
-	- definition
-	- call stack; call bytecode methods from bytecode methods
-	- arguments: scatter args, gather args, optional args
+	- definition (for class + singleton)
+	- normal, gather, optional, hash and ampersand args
 	- multiple results
-	* block args (eg (a, b, &c))
-- instance variables
+- variables
+	- local
+	- instance
+	- class
+	- global
 * call
+	- normal, scatter, hash and ampersand args
+	- call to super
 	* trap no such method errors
 	* test for -2 argc methods
-	- call to super
+	- test for private, protected
+	* method_missing
 * blocks
-	- pass blocks
+	- pass blocks to bytecode & C functions
+	- pass arguments to blocks
 	- yield
 	- next, break, redo, return
 	* retry
 	- dynamic local variables
-	- pass blocks to C functions
-	* ampersand parameters to methods
-- class defintions
-* module definitions
-* get and set constants
-- singleton methods
+	- for .. in
+* classes and constants
+	- class defintions	
+	* module definitions
+	* get and set constants
 * exceptions	
-	- raise
 	- rescue
 	- else after rescue
     	* retry
-    	* integrate compilation with case statement
     	- unwind value stack along with call stack
 	- catch exceptions raised in C
-	- remove RAISE bytecode hack - use C method like MRI
+	* maintain $! correctly
 * ensure
-- throw, catch
-* global variables
+	- return
+	- exceptions
+	- throw
+	- next, break & redo for while
+	- next, break & redo for blocks
+	* retry for blocks
+
 
 Ruby library support
 ====================
-* blocks -> procs
-* procs <-> methods
-* blocks -> methods
-* eval and friends
-* method_missing
+* procs
+	- closures
+		- capture self
+		- capture local vars
+		- capture block 
+	- arguments
+	* control flow
+		- break
+		* return - return or local jump error?
+		* retry etc
+* bindings, bound and unbound methods
+* eval, instance_eval etc
+	* variables
+	* control: break, return etc
+- throw, catch
 * set_trace_func
 * backtrace
-* threads
-* continuations
+	* file and line number for error messages
 * rb_frame_last_func (see rb_num_coerce_bin)
 * Module.constants
 * security levels
 * Class.inherited and similar callbacks
-
-Compiler
-========
-All the above plus:
-- allow methods to take arguments
-- not
-- array literals
-- hash literals
-* range literals
-* range flip-flops
+* $~, $& and other regex-related 'globals'
 * $_ (or does this belong in language support above?)
-- while
-* unless
-* until
-- next, redo, break in while and until loops
-- allow blocks to be defined and yielded to
-- multiple assignment
-- tests for block arg options (scatter, gather etc)
-* tests for singleton method definition
-- case statements
+* $! and $@
+* threads, continuations & signals
+
 
 Bugs
 ====
-* Failing tests in
-	* testStackAndJumps
-	* testRescue2
-	* testRescue3
-	* testSuper
-	* testClasses
-	* testConsts
+* failing tests (commented out in various test methods)
+* various seg faults when running with -bench
 * cross-refs between the Bytecode::Writer::*Manager classes are ugly
+* no tests yet for singleton method definition (except that it's used frequently)
+* rescue and case should share compilation code
 
-Interpreter infrastructure
-==========================
-- declare bytecode format in Ruby
-- Bytecode::Writer should calculate number of locals
-* memory leaks
-- per-frame stacks? (yes - necessary for stack unwinding)
-* bytecode dump and load
-* string, integer literals
-* declare bytecode effects in Ruby (like vmgen)
-* experiment with registers and arg sets rather than stack?
 
-Other guff
-==========
-- make Writer pretty print itself so eg blocks are indented
-* move to Ruby 1.6.8
-* move to Ruby 1.8.0
-* change compilation options to use -Wall or similar
-* document all methods using RDoc
+Future plans
+============
+* next release
+	* bug-fix break/return from procs etc
+	* review other failing tests
+	* ensure all tests complete when run with -bench (prob. GC issues)
+	* run Ruby code from files
+	* Great Language Shootout benchmarks
+
+* next but one
+	* eval
+	* __LINE__, __FILE__
+	* make bytecode implementation more declarative
+		* either use VMGen
+		* or write Ruby VMGen
+
+* future
+	* bytecode dump and load (can use Marshal to dump compiled Writer)
+	* self-hosting
+	* use Rubicon tests
+		* integrate testByteCodeRuby tests into Rubicon
+		* patch Rubicon to call ByteCodeRuby
+	* update details of the bytecodes
+	* document all methods using RDoc
+	* optimise - see below
+
+* not currently planned
+	* threads, continuations & signals 
+		- should be implemented by APR style thread sub-system
+		- i'd rather work on optimising the bytecode interpreter
+		- too difficult!
+
+- old
+	- move to Ruby 1.8.0
+	- change compilation options to use -Wall or similar
+
 
 Possible future optimisations
 =============================
 - optimise frames
 	- allocate locals 'inline' with struct frame
-	- allocate frames from a linear stack where possible (eg no block calls)
-* avoid gotos in rescue statements - make exceptionless route jumpless
-* inline various interpreter C functions
-* threaded bytecode dispatch
-* optimise argument handling for method calls
-* optimise yield to not go through an array
+	- allocate frames from a linear stack where possible (eg no captured closures)
+* pack all CALL flags into 1 flag word (rather than several as currently)
+* new bytecode C_CALL allowing direct call to named C func
+* remove NODE indirection for methods - make method hash point direct to
+  CodeBlocks
+* rescue: avoid gotos - make exceptionless route jumpless
+* array literals: avoid arbitrary stack depth when populating - use eg
+  ARY_FILL a <1> .. <n> #start #n - a
+  to put N stack values (<1> .. <n>) into array A starting at index START.
+  Similar for hashes.
+* closures: only peel frames off the stack if block references enclosing vars
+* inline various interpreter C functions (see Flux tool for inlining C)
+* threaded bytecode dispatch (perhaps via VMGen)
+* optimise argument handling for calls - introduce bytecodes to pull 
+  apart an (argc, argv) pair according to normal, optional, gather args (method
+  calls) and normal, gather args (block calls)  
+* yield: optimise to not go through an array
 * optimise a, b = b, a etc to not go through an intermediate array
 * static optimisation of bytecodes
-* macro bytecodes (dynamic optimisation)
-* method lookup using displays
-* bytecode for inline method dispatch on calls (though maybe swamped by bytecode dispatch overhead)
+	* eg LD_LOC 1 --> LD_LOC_1 etc (auto-generate from VMGen style decls)
+	* introduce eg + bytecode which:
+	  - if both args are Integer and Integer#+ isn't overridden adds 'em
+	  - if both args are String and String#+ isn't overridden concats 'em
+	  - performs full dispatch otherwise
+	  - (see what most common method calls are)
+	* macro bytecodes like VMGen
+* dynamic optimisations
+	* method lookup using displays (but lookup cache catches most anyway)
+	* bytecode for inline method dispatch on calls (though may be 
+	  swamped by bytecode dispatch overhead)
+* See also 'Optimizing Indirect Branch Prediction Accuracy in Virtual Machine Interpreters' (Ertl & Gregg) for how to speed up interpreters over and above threaded code.

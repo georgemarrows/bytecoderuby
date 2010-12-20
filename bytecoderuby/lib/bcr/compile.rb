@@ -1,10 +1,13 @@
-require 'ruth/mri'
-require 'writer'
+require 'bcr/compile_helpers'
 
 module Ruby
   module Interpreter
 
-    class MriNode
+    # shortcut
+    Helpers = Bytecode::CompileHelpers
+  
+    ########## Base class for nodes ########################
+    class Node
       # every node type must override at least one of 
       # compile_for_value and compile_for_void
       def compile_for_value(w, &block)
@@ -25,96 +28,24 @@ module Ruby
     end
 
     ########## Misc ########################################
-    module Ignore
-      def compile_for_value(w)
-	c = child
-	c.compile_for_value(w) if c
-      end
-      def compile_for_void(w)
-	c = child
-	child.compile_for_void(w) if c
-      end
-      def compile_for_return(w)
-	c = child
-	child.compile_for_return(w) if c
-      end
-    end
-
-    class MriNodeNewline
-      include Ignore
+    class NodeNewline
+      include Helpers::Ignore
       def child; next_node; end
     end
-    class MriNodeScope
-      include Ignore
+    class NodeScope
+      include Helpers::Ignore
       def child; next_node; end
     end
-    class MriNodeBegin
-      include Ignore
+    class NodeBegin
+      include Helpers::Ignore
       def child; body; end
     end
-
-    module CompileForValueUsingVoid
-      # convenience method for classes where compile_for_value is 
-      # pretty much the same as compile_for_void, so we implement
-      # compile_for_value by passing an optional flag to ..for_void.
-      def compile_for_value(w)
-        compile_for_void(w, true)
-      end
+    class NodeSvalue
+      include Helpers::Ignore
+      def child; head; end
     end
 
-    module PushSelf
-      def push_self(w)
-	w.ld_self
-      end
-    end
-
-    class MriNodeSelf
-      include PushSelf
-      def compile_for_value(w); push_self(w); end
-    end
-
-    class MriNodeArray
-      def unroll_onto_stack(w)
-        # Compiles each head element in self and self's subarrays.
-	# Returns the #elements in self.
-	ary = self
-	while ary
-	  ary.head.compile_for_value(w)
-          ary = ary.next_node
-        end
-        length
-      end
-      def unroll_for_masgn(w)
-        # Compiles (for void) the elements of self, *in reverse order*
-        # Used for MriNodeMasgn (multiple assignment).
-        next_node.unroll_for_masgn(w) if next_node
-        head.compile_for_void(w)
-      end
-      def each_child
-        node = self
-        while node
-	  yield node.head
-          node = node.next_node
-        end
-      end
-      def compile_for_value(w)
-	# FIXME real ruby doesn't call Array.[]
-        w.ld_imm(Array)
-        argc = unroll_onto_stack(w)
-        w.call(:[], argc)
-      end
-    end
-
-    class MriNodeHash
-      def compile_for_value(w)
-	# FIXME real ruby doesn't call Hash.[]
-        w.ld_imm(Hash)
-        argc = head.unroll_onto_stack(w)
-        w.call(:[], argc)
-      end
-    end
-
-    class MriNodeArgscat
+    class NodeArgscat
       def compile_for_value(w)
 	# FIXME real ruby doesn't call Array#concat
 	head.compile_for_value(w)
@@ -123,57 +54,7 @@ module Ruby
       end
     end
 
-    class MriNodeMasgn
-      include CompileForValueUsingVoid
-      def compile_for_void(w, really_for_value = false)
-
-	# VALUE - array - the rhs of the assignment
-	# HEAD - array - the lhs individual assignments (except gather)
-	# MASGN_ARGS - assignment to the gather arg (if any)
-	
-        value.compile_for_value(w) if value 
-
-        num_elems = head ? head.length : 0
-	gather    = masgn_args
-	gather    = nil if gather == :*  # not sure why * gets passed thru
-        
-        w.ary_scatter(num_elems, !!gather, really_for_value)
-
-        gather.compile_for_void(w) if gather
-        head.unroll_for_masgn(w) if head
-      end
-    end
-
-    ########## Literals ####################################
-    class MriNodeLit
-      def compile_for_value(w); w.ld_imm(literal); end
-    end
-    class MriNodeFalse
-      def compile_for_value(w); w.ld_imm(false); end
-    end
-    class MriNodeTrue
-      def compile_for_value(w); w.ld_imm(true); end
-    end
-    class MriNodeNil
-      def compile_for_value(w); w.ld_imm(nil); end
-    end
-
-    class MriNodeStr
-      # FIXME Ruby dups literal strings each time they 
-      # are executed.  	
-      def compile_for_value(w); w.ld_imm(literal); end
-    end
-
-    class MriNodeZarray
-      # FIXME real ruby doesn't call Array.[]
-      def compile_for_value(w); 
-        w.ld_imm(Array).
-          call(:[], 0)
-      end
-    end
-
-    ########### Statements ###################################
-    class MriNodeBlock
+    class NodeBlock
       def each_child
         node = self
         while node
@@ -212,102 +93,227 @@ module Ruby
       end
     end	
 
-    ############ Variables ###################################
-    module Assign
-      # Common code for assignments - looks after getting the
-      # value on to the stack
-      # Needs #assign_from_stack()
-      include CompileForValueUsingVoid
+    class NodeMasgn
+      include Helpers::CompileForValueUsingVoid
       def compile_for_void(w, really_for_value = false)
-        value.compile_for_value(w) if value
-	w.dup if really_for_value
-	assign_from_stack(w)
-      end 
-    end
 
-    module LocalAssign
-      include Assign
-      def assign_from_stack(w)
-	local_id, depth = w.locals.find_or_make_local(variable_id)
-	if depth == 0
-	  w.st_loc(local_id)
-	else
-	  w.st_loc_l(local_id, depth)
+	# VALUE - array - the rhs of the assignment
+	# HEAD - array - the lhs individual assignments (except gather)
+	# MASGN_ARGS - assignment to the gather arg (if any)
+	
+        value.compile_for_value(w) if value 
+
+        num_elems = head ? head.length : 0
+	gather    = masgn_args
+	gather    = nil if gather == :*  # not sure why * gets passed thru
+        
+        w.ary_scatter(num_elems, !!gather, really_for_value)
+
+	w.honouring_nil_asgns do
+	  gather.compile_for_void(w) if gather
+	  head.unroll_for_masgn(w) if head
 	end
       end
     end
 
-    module LocalAccess
+    ########## Literals ####################################
+    class NodeLit
+      # Numbers (ints, floats etc)
+      include Helpers::IgnoreCompileForVoid
+      def compile_for_value(w); w.ld_imm(literal); end
+    end
+
+    class NodeFalse
+      include Helpers::IgnoreCompileForVoid
+      def compile_for_value(w); w.ld_imm(false); end
+    end
+
+    class NodeTrue
+      include Helpers::IgnoreCompileForVoid
+      def compile_for_value(w); w.ld_imm(true); end
+    end
+
+    class NodeNil
+      include Helpers::IgnoreCompileForVoid
+      def compile_for_value(w); w.ld_imm(nil); end
+    end
+
+    class NodeStr
+      # A string.
+      include Helpers::IgnoreCompileForVoid
+      # FIXME Ruby dups literal strings each time they 
+      # are executed.  	
+      def compile_for_value(w); w.ld_imm(literal); end
+    end
+
+    class NodeSelf
+      # Self .. not really a literal, but near enough.
+      include Helpers::IgnoreCompileForVoid
+      def compile_for_value(w); w.ld_self; end
+    end
+
+    class NodeDot2
+      # An inclusive range ( .. )
+      include Helpers::NodeDot
+      def exclusive?; false; end
+    end
+
+    class NodeDot3
+      # An exclusive range ( ... )
+      include Helpers::NodeDot
+      def exclusive?; true; end
+    end
+
+    class NodeHash
+      # A hash
       def compile_for_value(w)
-	local_id, depth = w.locals.find_local(variable_id)
-	if depth == 0
-	  w.ld_loc(local_id)
-	else
-	  w.ld_loc_l(local_id, depth)
-	end
-      end 
+	# FIXME real ruby doesn't call Hash.[]
+        w.ld_imm(Hash)
+        argc = head.unroll_onto_stack(w)
+        w.call(:[], argc)
+      end
     end
 
-    class MriNodeLasgn
-      include LocalAssign
+    class NodeZarray
+      # An empty array.
+      # FIXME real ruby doesn't call Array.[]
+      def compile_for_value(w); 
+        w.ld_imm(Array).
+          call(:[], 0)
+      end
     end
 
-    class MriNodeDasgn
-      include LocalAssign
+    class NodeArray
+      # An array. Arrays are used internally by MRI so there's
+      # additional helper methods on here besides the obvious
+      # compile_for_value
+      def compile_for_value(w)
+	# FIXME real ruby doesn't call Array.[]
+        w.ld_imm(Array)
+        argc = unroll_onto_stack(w)
+        w.call(:[], argc)
+      end
+      def unroll_onto_stack(w)
+        # Compiles each head element in self and self's subarrays.
+	# Returns the #elements in self.
+	ary = self
+	while ary
+	  ary.head.compile_for_value(w)
+          ary = ary.next_node
+        end
+        length
+      end
+      def unroll_for_masgn(w)
+        # Compiles (for void) the elements of self, *in reverse order*
+        # Used for NodeMasgn (multiple assignment).
+        next_node.unroll_for_masgn(w) if next_node
+        head.compile_for_void(w)
+      end
+      def each_child
+        node = self
+        while node
+	  yield node.head
+          node = node.next_node
+        end
+      end
     end
 
-    class MriNodeDasgn_curr
-      include LocalAssign
+    ############ Variables ###################################
+    class NodeLasgn
+      # Assignment to a local, a = 1
+      include Helpers::LocalAssign
+    end
+
+    class NodeDasgn
+      # Assignment to a local in a block, a = 1
+      include Helpers::LocalAssign
+    end
+
+    class NodeDasgn_curr
+      # Assignment to a local in the current block, a = 1
+      include Helpers::LocalAssign
       # Dasgn_curr seems to be assignment to a var in innermost block,
       # so we could actually optimise the compilation code here. It
       # doesn't seem worth it however
     end
 
-    class MriNodeLvar
-      include LocalAccess
+    class NodeLvar
+      # Access to a local, a
+      include Helpers::LocalAccess
     end
 
-    class MriNodeDvar
-      include LocalAccess
+    class NodeDvar
+      # Access to a local in a block, a
+      include Helpers::LocalAccess
     end
 
-    class MriNodeIvar
-      def compile_for_value(w)
-	w.ld_ivar(variable_id)
-      end
-    end
-
-    class MriNodeIasgn
-      include Assign
+    class NodeIasgn
+      # Assignment to an instance variable, @a = 1
+      include Helpers::Assign
       def assign_from_stack(w)
 	w.st_ivar(variable_id)
       end 
     end
 
-    class MriNodeConst
-      include PushSelf
+    class NodeIvar
+      # Access to an instance variable, @a
       def compile_for_value(w)
-        # FIXME this is just a quick hack to allow method testing
-	push_self(w)
-	w.ld_imm(variable_id).
-          call(:bcr_const_get, 1)	
-
-#    def bcr_const_get(const_name)
-#      o = (Class === self) ? self : self.class
-#      o.const_get(name)
-#    end
-#        w.ld_imm(Object).
-#	w.call(:class, 0)
-#       w.ld_imm(variable_id).
-#          call(:const_get, 1)
+	w.ld_ivar(variable_id)
       end
     end
 
+    class NodeGasgn
+      # Assignment to a global, $a = 1
+      include Helpers::Assign
+      def assign_from_stack(w)
+	w.st_gvar(variable_id)
+      end 
+    end
+
+    class NodeGvar
+      # Access to a global, $a
+      def compile_for_value(w)
+	w.ld_gvar(variable_id)
+      end
+    end
+
+    class NodeConst
+      include Helpers::ConstAccess
+      # Access to a constant, A
+      def compile_for_value(w)
+	const_get(w, variable_id)
+      end
+    end
+
+    #############  Class variables #################
+    class NodeCvdecl
+    # Decl. of class variable
+      include Helpers::Assign
+      def assign_from_stack(w)
+        w.ld_self
+        w.def_cvar(variable_id)
+      end
+    end
+
+    class NodeCvasgn
+    # Assignment to class variable
+     include Helpers::Assign
+      def assign_from_stack(w)
+        w.st_cvar(variable_id)
+      end
+    end
+
+    class NodeCvar
+    # Access to class variable
+      def compile_for_value(w)
+        w.ld_cvar(variable_id)
+      end
+    end
 
     #############  Class, method definitions #################
-    class MriNodeClass
-      include PushSelf
-      include CompileForValueUsingVoid
+    class NodeClass
+      # Class declaration class A .. end
+      include Helpers::CompileForValueUsingVoid
       def compile_for_void(w, really_for_value=false)
 	# Compile the class body into a separate method_writer
         method_writer = Bytecode::Writer.new()
@@ -319,9 +325,13 @@ module Ruby
 	body.compile_for_return(method_writer) if body
 
 	# Now the bytecode for the class; end statement itself
-	push_self(w)
-	w.ld_imm(class_name)
+	w.ld_self.
+	  ld_imm(class_name.method_id) # FIXME don't understand Colon2!
 	if zsuper
+	  # FIXME this should be protected by a rescue so that if the
+	  # zsuper can't be found we raise the correct 'TypeError:
+	  # undefined superclass' rather than 'NameError:
+	  # uninitialized constant' as currently
 	  zsuper.compile_for_value(w)
 	else
 	  w.ld_imm(nil)
@@ -335,184 +345,65 @@ module Ruby
 	w.pop if !really_for_value
       end
     end
-    
-    module MethodDefinition
-      # Common code for MriNodeDefn and MriNodeDefs
-      # Needs #define_method
-      attr_reader :normal_args,
-                  :optional_args,
-                  :rest_arg,
-		  :block_arg,
-                  :body
- 
-      def compile_for_void(w)
-	decode
 
-        if block_arg
-          print("Warning: block arguments to methods are currently ignored!\n")
-        end
-
-        method_writer = Bytecode::Writer.new(nil, method_id)
-
-        method_writer.locals.register_locals(normal_args)
-	method_writer.num_args = normal_args.size
-
-	compile_opt_args(method_writer)
-
-        if rest_arg
-	  method_writer.locals.register_locals([rest_arg])
-	  method_writer.rest_arg = true
-	end
-
-        body.compile_for_return(method_writer)
-
-	define_method(w, method_writer)
-      end
-
-      def compile_opt_args(method_writer)
-	return unless optional_args
-
-	jump_points = [0]
-	optional_args.each_child do |arg, last|
-	  unless MriNodeLasgn === arg
-	    raise "unexpected assignment to non-local var for optional args"
-	  end
-	  arg.compile_for_void(method_writer)
-	  jump_points.push(method_writer.current_pc)
-	end
-
-	method_writer.opt_args_jump_points = jump_points
-      end
-
-      def decode
-	# Decode the MRI representation of arguments into something
-        # a bit more understandable.
-        return if @decodedp
-	
-	# Method     Object
-	#            Defn
-	# defn         Scope                        
-	# table          arg names
-	# next_node      Block
-        # head             Args 
-	# arg_names          number required args
-	# rest               index of rest arg + 2, or -1 if no rest arg
-	# optional           optional args, if any
-	# next_node        body
-
-	scope     = defn
-        arg_names = scope.table
-        args      = scope.next_node.head
-        body      = scope.next_node.next_node
-
-        @normal_args   = arg_names[0, args.count]
-	@optional_args = args.optional
-        @rest_arg      = if args.rest == -1
-                           nil
-                         else
-                           arg_names[args.rest - 2]
-                         end
-
-        if body.head.kind_of?(MriNodeBlock_arg)
-          @block_arg = body.head.variable_id
-          @body      = body.next_node
-        else
-          @block_arg = nil
-          @body      = body
-        end
-
-        @decodedp = true 
-      end
-    end
-
-    class MriNodeDefn
-      include MethodDefinition, PushSelf
+    class NodeDefn
+      # Define a method, def a .. end
+      include Helpers::MethodDefinition
       def define_method(w, method_writer)
-        push_self(w)
-        w.defn(method_id, method_writer)
+        w.ld_self.
+	  defn(method_id, method_writer)
       end
     end
 
-    class MriNodeDefs
-      include MethodDefinition
+    class NodeDefs
+      # Define a singleton method, def o.a .. end
+      include Helpers::MethodDefinition
       def define_method(w, method_writer)
         receiver.compile_for_value(w)
         w.defs(method_id, method_writer)
       end
     end
 
-    ######## Control flow #############################
-    module NodeCall
-      # Common code for MriNodeCall and MriNodeFcall
-      # Needs #put_receiver_on_stack, #compile_args, 
-      #   #method_name and #superp
-      def compile_for_value(w, &block)
-        put_receiver_on_stack(w)
-	argc = compile_args(w)
-	w.call(method_name(w), argc, superp, &block)
-      end
-    end
-    
-    module NotSuper
-      def superp; false; end
-    end
-
-    module Super
-      def superp; true; end
-    end
-
-    module ExplicitArgs
-      def compile_args(w)
-	case args
-	when MriNodeArray     # normal args only, no scatter
-	  argc = args.unroll_onto_stack(w)
-	when NilClass         # no args at all
-	  argc = 0
-	when MriNodeArgscat   # normal (head) + scatter (body)
-	  argc = -(1 + args.head.unroll_onto_stack(w))
-	  args.body.compile_for_value(w)
-	when MriNodeRestargs  # scatter only
-	  argc = -1
-	  args.head.compile_for_value(w)
-	else
-	  raise "Found unknown node when compiling args: #{args.type}"
-	end
-	argc
-      end
-    end
-
-    class MriNodeCall
-      include NodeCall, NotSuper, ExplicitArgs
+    ######## Calls#####################################
+    class NodeCall
+      # Call o.a()
+      include Helpers::Call
       def put_receiver_on_stack(w)
         receiver.compile_for_value(w)
       end
-      def method_name(w)
-	method_id
+    end
+
+    class NodeAttrasgn
+      # Call o.a() (not sure how this differs from Call)
+      include Helpers::Call
+      def put_receiver_on_stack(w)
+        receiver.compile_for_value(w)
       end
     end
 
-    class MriNodeFcall
-      include NodeCall, PushSelf, NotSuper, ExplicitArgs
-      alias :put_receiver_on_stack :push_self
-      def method_name(w)
-	method_id
-      end
+    class NodeFcall
+      # Call to self, self.a() or a()
+      include Helpers::Call
+      include Helpers::PrivateOk
     end
 
-    class MriNodeSuper
-      include NodeCall, PushSelf, Super, ExplicitArgs
-      alias :put_receiver_on_stack :push_self
-      def method_name(w)
-	w.method_name
-      end
+    class NodeVcall
+      # Call to self that can't be distinguished from local access, a
+      include Helpers::Call
+      include Helpers::PrivateOk
+      def compile_args(w); 0; end
     end
 
-    class MriNodeZsuper
-      include NodeCall, PushSelf, Super
-      alias :put_receiver_on_stack :push_self
-      def method_name(w)
-	w.method_name
-      end   
+    class NodeSuper
+      # Call to super, super(a)
+      include Helpers::Call
+      include Helpers::Super
+    end
+
+    class NodeZsuper
+      # Call to super using calling method's args, super
+      include Helpers::Call
+      include Helpers::Super
       def compile_args(w)
 	# FIXME *args also
 	num_args = w.num_args + w.num_opt_args
@@ -521,34 +412,50 @@ module Ruby
       end
     end
 
-    class MriNodeIter
+    ######## Iterator and for #####################################
+    class NodeIter
+      # Call with a block, o.a() { .. }
+      include Helpers::IterForHelper
       def compile_for_value(w)
-	iter.compile_for_value(w) do |block|
-          block.num_args = 1
-	  if variable
-	    # yield puts args in first local, 
-	    # but we want them on the stack
-	    block.ld_loc(0) 
-	    variable.compile_for_void(block) 
-	  end
-	  block.loops.redo_label() # set the target for any redo's
-	  if body
-	    body.compile_for_return(block)
-	  else
-	    block.ld_imm(nil).return(0)
-	  end
-        end
+	p = block_compiler_proc(false)
+	iter.compile_for_value(w, :block => p)
       end
     end
 
-    class MriNodeYield
+    class NodeFor
+      # For, for .. in .. end
+      include Helpers::IterForHelper
       def compile_for_value(w)
-        stts.compile_for_value(w)
+	iter.compile_for_value(w)
+	p = block_compiler_proc(true)
+	w.call(:each, 0, false, false, false, p)
+      end
+    end
+
+    ######## Ampersand args  ############################    
+    class NodeBlock_pass
+      # Call with an ampersand arg, o.a(&p)
+      def compile_for_value(w)
+	body.compile_for_value(w)
+	iter.compile_for_value(w, :ampersand_arg => true)
+      end
+    end
+
+    ######## Yield and return #####################################
+    class NodeYield
+      # Yield to block, yield a
+      def compile_for_value(w)
+	if stts
+	  stts.compile_for_value(w)
+	else
+	  w.ld_imm(nil)
+	end
         w.yield(1, w.depth)
       end
     end
 
-    class MriNodeReturn
+    class NodeReturn
+      # Return, return a
       def compile_for_void(w)
         if stts
           stts.compile_for_value(w)
@@ -562,44 +469,49 @@ module Ruby
       end
     end
 
-    class MriNodeWhile
-      def compile_for_void(w)
-        w.loops.while_loop do |loop|
-          w.label(loop.before_condition)
-          
-          conditional.compile_for_value(w)
-          w.if_not(loop.out)
-           
-          w.label(loop.after_condition)  # for use by redo
-
-          body.compile_for_void(w) if body
-
-          w.goto(loop.before_condition)
-
-          w.label(loop.out)
-        end
+    ######## Until  #####################################
+    class NodeUntil
+      # until <cond> .. end
+      include Helpers::NodeWhileUntil
+      def cond_jump(w,loop)
+        w.if(loop.out)
       end
     end
 
-    class MriNodeBreak
+    ######## While  #####################################
+    class NodeWhile
+      # While loop, while <cond> .. end
+      include Helpers::NodeWhileUntil
+      def cond_jump(w,loop)
+       w.if_not(loop.out)
+      end
+    end
+
+    ######## Loop control #####################################
+    class NodeBreak
       def compile_for_void(w)
+	if stts
+	  stts.compile_for_value(w)
+	else
+	  w.ld_imm(nil)
+	end
 	w.loops.break
       end
     end
 
-    class MriNodeNext
+    class NodeNext
       def compile_for_void(w)
 	w.loops.next
       end
     end
 
-    class MriNodeRedo
+    class NodeRedo
       def compile_for_void(w)
 	w.loops.redo
       end
     end
 
-    class MriNodeRetry
+    class NodeRetry
       def compile_for_void(w)
 	# retry only valid inside blocks and rescue clauses,
 	# so we don't use current_loop
@@ -607,86 +519,65 @@ module Ruby
       end
     end
 
-    class MriNodeIf
+
+    ######## If, and, or, not #####################################
+    class NodeIf
       def common_code(w)
-        not_true_lbl = w.labels.new("not_true")
-        end_lbl = w.labels.new("end")
+        not_true_lbl = w.new_label
+        end_lbl = w.new_label
 
         conditional.compile_for_value(w)
 	w.if_not(not_true_lbl)
 
 	yield not_true_lbl, end_lbl
 
-        w.label(end_lbl)
+        end_lbl.place
       end
       def compile_for_value(w)
 	common_code(w) do |not_true_lbl, end_lbl|
-	  body.compile_for_value(w)
+	  body ? body.compile_for_value(w) : w.ld_imm(nil)
 	  w.goto(end_lbl)
 	  
-	  w.label(not_true_lbl)
+	  not_true_lbl.place
 	  zelse ? zelse.compile_for_value(w) : w.ld_imm(nil)
 	end
       end
       def compile_for_void(w)
 	common_code(w) do |not_true_lbl, end_lbl|
-	  body.compile_for_void(w)
+	  body.compile_for_void(w) if body
 	  w.goto(end_lbl) if zelse
 
-	  w.label(not_true_lbl)	
+	  not_true_lbl.place
 	  zelse.compile_for_void(w) if zelse
 	end
       end
     end
 
-    module NodeOrAnd
-      # Common code for MriNodeOr and MriNodeAnds
-      # Needs #if_type
-      def common_code(w)
-        out_lbl = w.labels.new("out")
-        first.compile_for_value(w)
-	yield out_lbl
-        w.label(out_lbl)	
-      end
-      def compile_for_value(w)
-	common_code(w) do |out_lbl|
-	  w.dup.send(if_type, out_lbl).pop
-	  second.compile_for_value(w)
-	end
-      end
-      def compile_for_void(w)
-	common_code(w) do |out_lbl|
-	  w.send(if_type, out_lbl)
-	  second.compile_for_void(w)
-	end
-      end
-    end
-   
-    class MriNodeOr
-      include NodeOrAnd
+    class NodeOr
+      include Helpers::NodeOrAnd
       def if_type; :if; end
     end
 
-    class MriNodeAnd
-      include NodeOrAnd
+    class NodeAnd
+      include Helpers::NodeOrAnd
       def if_type; :if_not; end
     end
 
-    class MriNodeNot
+    class NodeNot
       def compile_for_value(w)
-        true_lbl = w.labels.new("true")
-        out_lbl = w.labels.new("out")
+        true_lbl = w.new_label
+        out_lbl = w.new_label
 	body.compile_for_value(w)
 	w.if(true_lbl).
           ld_imm(true).
-          goto(out_lbl).
-	  label(true_lbl).
-	  ld_imm(false).
-	  label(out_lbl)
+          goto(out_lbl)
+	true_lbl.place
+	w.ld_imm(false)
+	out_lbl.place
       end
     end
 
-    class MriNodeCase
+    class NodeCase
 =begin
 Tree structure is:
 
@@ -727,9 +618,9 @@ when3:
 out:
 rest of code
 =end
-      include CompileForValueUsingVoid      
+      include Helpers::CompileForValueUsingVoid      
       def compile_for_void(w, really_for_value = false)
-        out_lbl     = w.labels.new("out")
+        out_lbl     = w.new_label #("out")
 	compile_msg = if really_for_value
 			:compile_for_value
 		      else
@@ -743,7 +634,7 @@ rest of code
 
         body.each_child do |when_or_else_node|
 	  case when_or_else_node
-	  when MriNodeWhen
+	  when NodeWhen
 	    when_or_else_node.send(compile_msg, w, out_lbl)
 	  when nil
 	    # this code gets executed when all matches have failed
@@ -759,14 +650,14 @@ rest of code
 	  end
         end
 
-        w.label(out_lbl)
+        out_lbl.place
       end
     end
 
-    class MriNodeWhen
+    class NodeWhen
       def each_child
         node = self
-        while MriNodeWhen === node
+        while NodeWhen === node
 	  yield node
           node = node.next_node
         end
@@ -778,7 +669,7 @@ rest of code
       end
 
       def compile_for_void(w, out_lbl, really_for_value = false)
-	code_lbl    = w.labels.new("code")
+	code_lbl    = w.new_label
 	compile_msg = if really_for_value
 			:compile_for_value
 		      else
@@ -796,11 +687,11 @@ rest of code
 	end
 	
 	# come here if no matches
-	next_when_lbl = w.labels.new("when")
+	next_when_lbl = w.new_label 
 	w.goto(next_when_lbl)  
 	
 	# come here if we had a match
-	w.label(code_lbl)
+	code_lbl.place
 	w.pop                  # remove test value
 	if body	       
 	  body.send(compile_msg, w) 
@@ -811,57 +702,107 @@ rest of code
 	w.goto(out_lbl)
 	
 	# label picking up the next when (or else) clause
-	w.label(next_when_lbl)
+	next_when_lbl.place
       end
     end
 
     ######## Exceptions #############################
-    class MriNodeRescue
+    class NodeEnsure
+      def compile(w, zbody, zensure, compile_msg)
+	if !zbody
+	  # empty body has value nil
+	  w.ld_imm(nil) if compile_msg == :compile_for_value 
+	  zensure.compile_for_void(w)
+	  # no need to rehandle - ensure must have run normally
+	  # without a jump (no body to cause the jump!)
+	  return
+	end
+
+	handler = w.handlers.with_ensure_handler do
+	  zbody.send(compile_msg, w)
+	end
+	
+	handler.in_handler do
+	  # ensure block can never have a value
+	  zensure.compile_for_void(w)
+	  w.jump_rehandle(handler.storage)
+	end
+      end
+      def compile_for_void(w)
+	compile(w, head, ensr, :compile_for_void)
+      end
       def compile_for_value(w)
-	#     head         protected by handler
-	#     else         protected by prev handler
-	#     goto         no_exception
-	#     handler      protected by prev handler
-	#     no_exception:
-	w.handlers.rescue(head, zelse, resque)
-
-
-#	w.handlers.rescue(resque,
-#			  proc do
-#			    head.compile_for_value(w) if head
-#			  end,
-#			  proc do
-#			    self.zelse.compile_for_value(w) if self.zelse
-#			  end)
+	compile(w, head, ensr, :compile_for_value)
       end
     end
 
-    class MriNodeResbody
-      def compile_for_value(w, out_lbl)
-	compile_for_void(w, out_lbl, true)
+
+    class NodeRescue
+      # A block with rescue clauses, begin .. rescue .. end
+      def compile_for_value(w)
+	#     head                protected by handler
+	#     else                protected by prev handler
+	#     goto no_exception
+	#     handler             protected by prev handler
+	#     no_exception:
+	if !head
+	  # no exceptions possible if no head
+	  w.ld_imm(nil)
+	  return
+	end
+
+	no_exception_label = w.new_label
+	handler = w.handlers.with_rescue_handler do
+	   head.compile_for_value(w)
+	end
+
+	zelse.compile_for_value(w) if zelse
+	w.goto(no_exception_label)
+
+	handler.in_handler do
+	  resque.compile_for_value(w, no_exception_label, handler) if resque
+	end
+
+	no_exception_label.place
       end
-      def compile_for_void(w, out_lbl, really_for_value = false)
-	code_lbl = w.labels.new("code")
+    end
+
+    class NodeResbody
+      include Helpers::ConstAccess
+      # A rescue clause, rescue
+      def compile_for_value(w, out_lbl, handler)
+	compile_for_void(w, out_lbl, handler, true)
+      end
+      def compile_for_void(w, out_lbl, handler, really_for_value = false)
+	code_lbl = w.new_label 
 	compile_msg = if really_for_value
 			:compile_for_value
 		      else
 			:compile_for_void
 		      end
 
-	args.each_child do |exception_class|
-	  w.dup
-	  exception_class.compile_for_value(w)
-	  w.swap
-	  w.call(:===, 1)
-	  w.if(code_lbl)
+	if args  # catch specific exception classes
+	  args.each_child do |exception_class|
+	    w.dup
+	    exception_class.compile_for_value(w)
+	    w.swap.
+	      call(:===, 1).
+	      if(code_lbl)
+	  end
+	else
+	  w.dup  # no exception class specified - catch StandardError
+	  const_get(w, :StandardError)  
+	  w.swap.
+	    call(:===, 1).
+	    if(code_lbl)
 	end
 
 	# come here if no matches
-	next_rescue_lbl = w.labels.new("rescue")
+	next_rescue_lbl = w.new_label
 	w.goto(next_rescue_lbl)  
 	
 	# come here if we had a match
-	w.label(code_lbl)
+	code_lbl.place
 
 	if body
 	  rbody = maybe_store_exception(w, body)
@@ -874,12 +815,13 @@ rest of code
 	w.goto(out_lbl)
 	
 	# label picking up the next rescue (or else) clause
-	w.label(next_rescue_lbl)
+	next_rescue_lbl.place
 	if head
-	  head.compile_for_value(w, out_lbl)
+	  # FIXME what about value/void distinction here?
+	  head.compile_for_value(w, out_lbl, handler)
 	else
 	  # don't pop - leave exception on stack for reraising
-	  w.rehandle
+	  w.jump_rehandle(handler.storage)
 	end
       end
 
@@ -889,7 +831,7 @@ rest of code
 	# Block(Assign(e, Gvar($!))) in the parse tree, so we have to 
 	# hack about a bit to detect it
 
-	if resbody.kind_of?(MriNodeBlock)
+	if resbody.kind_of?(NodeBlock)
 	  assign = resbody.head
 	  retval = resbody.next_node
 	else
@@ -897,9 +839,9 @@ rest of code
 	  retval = nil
 	end
 
-	if assign.kind_of?(Assign) and 
-	   (gvar = assign.value).kind_of?(MriNodeGvar) and
-	   gvar.entry == :$!
+	if assign.kind_of?(Helpers::Assign) and 
+	   (gvar = assign.value).kind_of?(NodeGvar) and
+	   gvar.variable_id == :$!
 
 	  # This covers the very obscure case of 'rescue blah => e; end'
 	  # ie no actual handler code. In this case, the value 
@@ -919,33 +861,6 @@ rest of code
       end
     end
 
-  end
-end
-
-
-module Bytecode
-  def Bytecode.compile_and_run_for_void(ruby_src)
-
-    p = Ruby::Interpreter.parse(ruby_src)
-    print "\n#{p.inspect}\n\n" if ARGV.include?("-print")
-
-    p.compile_for_void(w = Writer.new())
-    w.ld_imm(nil).return(0)
-
-    #puts w.to_s
-
-    Runner.run_from_writer(w)
-    
-  end
-  def Bytecode.compile_and_run_for_return(ruby_src)
-    p = Ruby::Interpreter.parse(ruby_src)
-    print "\n#{p.inspect}\n\n" if ARGV.include?("-print")
-
-    p.compile_for_return(w = Writer.new())
-    w.compile()
-#    puts w.to_s if ARGV.include?("-print")
-
-    Runner.run_from_writer(w)
   end
 end
 

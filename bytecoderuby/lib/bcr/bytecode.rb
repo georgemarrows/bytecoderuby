@@ -45,6 +45,9 @@ LocalJumpError if the frame is no longer on the call stack.
 GOTO,    [offset]
 Jumps to the bytecode at OFFSET relative to the start of this opcode.
 
+GOTO_E,    [offset]
+Like GOTO but runs any ensures between the current and target pcs.
+
 IF,      [offset]
 Pops a value off the stack. If it's true (ie neither false nor nil), 
 jumps to the bytecode at OFFSET relative to the start of this opcode; 
@@ -79,8 +82,19 @@ Pops an object off the stack. Pushes the value of the instance variable
 VAR_ID of the object that was tos.
 
 ST_IVAR, [var_id]
-Pops two items off the stack. Stores the item that was one below the top 
-of stack into the instance variable VAR_ID of the object that was tos.
+Pops an item off the stack and stores it into the instance variable VAR_ID
+ of SELF.
+
+LD_CVAR, [var_id]
+Pops an object off the stack. Pushes the value of the class variable VAR_ID
+of the object that was tos.
+
+ST_CVAR, [var_id]
+Pops an item off the stack and stores it into the class variable VAR_ID
+ of SELF.
+
+DEF_CVAR, [var_id]
+Pops two items off the stack; tos must be a class object. Stores one below tos into the class variable VAR_ID of the class object that was tos.
 
 DEFS FIXME
 
@@ -89,6 +103,11 @@ Pushes self on to the stack
 
 RUN,   [code]
 Pops the stack and runs CODE with that object as self.
+
+MAKE_PROC
+Creates proc from the block passed to the current frame (if any) and
+pushes it on the stack. Used in the implementation of ampersand arguments
+for methods.
 =end
 
 module Bytecode
@@ -103,7 +122,7 @@ module Bytecode
     end	
     def to_s
         args = @args.join("\t")
-        "#{type.name}\t#{args}"
+        "#{self.class.name}\t#{args}"
     end	
   end
 
@@ -180,7 +199,11 @@ module Bytecode
   instruction 'ST_LOC_L',    ['var', 'count'],          'LocalInstruction' 
   instruction 'LD_IVAR',     ['var_id']
   instruction 'ST_IVAR',     ['var_id']
+  instruction 'DEF_CVAR',    ['var_id']
+  instruction 'LD_CVAR',     ['var_id']
+  instruction 'ST_CVAR',     ['var_id']
   instruction 'LD_GVAR',     ['var_id']
+  instruction 'ST_GVAR',     ['var_id']
 
 
   instruction 'DUP',         []
@@ -189,10 +212,13 @@ module Bytecode
   instruction 'ARY_SCATTER', ['num_elems', 'gather', 'push_value']
 
   instruction 'GOTO',        ['offset'],                'BranchInstruction'
+  instruction 'GOTO_E',      ['offset'],                'BranchInstruction'
+
   instruction 'IF',          ['offset'],                'BranchInstruction'
   instruction 'IF_NOT',      ['offset'],                'BranchInstruction'
 
-  instruction 'CALL',        ['method_id', 'num_args', 'superp', 'block']
+  instruction 'CALL',        ['method_id', 'num_args', 'superp', 
+	                      'private_okp', 'ampersand_argp', 'block']
   instruction 'RETURN',      ['count']	
   instruction 'YIELD',       ['num_args', 'count']
   instruction 'BREAK',       []
@@ -200,11 +226,15 @@ module Bytecode
 
   instruction 'DEFN',        ['name', 'code']
   instruction 'DEFS',        ['name', 'code']
+  instruction 'MAKE_PROC',   []
 
-  instruction 'REHANDLE',    []
+  instruction 'JUMP_REHANDLE',  ['storage']
+
+  instruction 'HBODY_ENTER',    ['storage']
+
 
   def Bytecode.each_instruction
-    constants.each do |name|
+    constants.sort.each do |name|
       val = const_get(name)
       if val.kind_of?(::Class) and val < Instruction
 	yield(val, name)

@@ -1,3 +1,32 @@
+In 0.2.0
+--------
+- break and return now work correctly if iterator is implemented in C
+- ensure for exceptions; return; block and while forms of break, next and redo
+- beginnings of garbage collection
+- moved exception catching code round entire bc_run function so that 
+  exceptions raised by helper functions (eg bc_find_method) find the correct 
+  handler
+- calls to private and protected methods now handled correctly 
+  (though the actual methods 'private', 'protected' and 'public' only 
+  work if passed method names as arguments; no arg form doesn't work)
+- Range and Regexp literals
+- unless .. end (+ improve if tests)
+- calls without args, () or receiver (=NodeVcall) now OK
+- tests for methods without bodies
+- for .. in .. end
+- global variables, except special cases like match vars ($~, $1 etc) and $_
+- directory and file restructuring
+- compile with -Wall and remove all warnings
+- procs: arguments, closures (self, local, block), control flow 
+  (control flow not complete yet)
+- rebase on Ruby 1.8.0 and ruth 0.10.0
+- ampersand arguments: in call + method definitions
+- split helpers out from Node compilation code (compile_helpers.rb)
+- break can take argument
+- until (Mark Wassell)
+- class variables (Mark Wassell)
+- throw and catch
+
 In 0.1.3
 --------
 - exceptions: catch exception into local variable

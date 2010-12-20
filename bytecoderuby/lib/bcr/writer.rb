@@ -1,15 +1,5 @@
-#!/usr/bin/ruby
-
-require 'Runner'
-require 'bytecode_mri'
-
-class Class
-  def define_bytecode_method(name, writer, num_args)
-    writer.compile
-    writer.num_args = num_args
-    define_bytecode_method0(name, writer)	
-  end
-end
+require 'bcr/bcr_runtime.so'
+require 'bcr/bytecode_mri'
 
 module Bytecode
 
@@ -23,7 +13,7 @@ module Bytecode
     attr_accessor :num_locals, :num_args, :opt_args_jump_points, :rest_arg
     attr_reader   :parent, :method_name, :depth, :current_pc
 
-    attr_reader   :locals, :loops, :labels, :handlers
+    attr_reader   :locals, :loops, :handlers
 
     def initialize(parent = nil, method_name = nil)
       @parent      = parent
@@ -33,10 +23,15 @@ module Bytecode
       @code        = []   # holds the bytecode instruction objects
       @current_pc  = 0
 
+      @honour_nil_asgns_depth = 0
+
       @locals = LocalManager.new(self)
       @loops  = LoopManager.new(self)
-      @labels = LabelManager.new(self)
       @handlers = HandlerManager.new(self)
+    end
+
+    def new_label
+      JumpTarget.new(self)
     end
 
     def num_opt_args
@@ -45,9 +40,11 @@ module Bytecode
     end
 
     def to_s
+      compile
+      
       sep = "\n" + "\t" * depth
-#      sep + @code.join(sep)
-      result = ""
+
+      result = sep + "Codeblock #{@method_name} num_locals=#{@num_locals}"
       pc = 0
       @code.each do |instruction|
 	result << sep << pc.to_s << "\t" << instruction.to_s
@@ -60,12 +57,6 @@ module Bytecode
       @result << code
     end
 
-    # Labels
-    def label(name)
-      labels.label(name, @current_pc)
-      self
-    end
-
     def add_instruction(instruction)
 	@code << instruction
 	@current_pc +=instruction.bc_size
@@ -73,68 +64,67 @@ module Bytecode
     end
 
     # Instructions requiring special handling
-    def call(method_id, num_args, superp=false)
-	if block_given?
-	    # allow block or method defn. code to be added
-	    code = Writer.new(self)
-	    yield code	
-	else
-	    code = nil
-	end
-        superp = superp ?  1 : 0
-	instruction = Call.new(method_id, num_args, superp, code)
-	add_instruction(instruction)
-    end
-
-    def local_id_from_name(local_name)
-      if local_name.kind_of?(Fixnum)
-      then
-	local_name
+    def call( method_id, num_args, superp=false, 
+	      private_okp=false, ampersand_argp=false, block=nil)
+      if block
+	# allow block or method defn. code to be added
+	code = Writer.new(self)
+	block.call(code) #yield code	
       else
-        @locals[local_name] || register_local(local_name)
+	code = nil
       end
-    end
-
-    private :local_id_from_name
-
-    def ld_loc(local_name)
-      add_instruction(LdLoc.new(local_id_from_name(local_name)))
-    end
-
-    def st_loc(local_name)
-      add_instruction(StLoc.new(local_id_from_name(local_name)))
+      instruction = Call.new( method_id, num_args, superp, 
+			      private_okp, ampersand_argp, code)
+      add_instruction(instruction)
     end
 
     # Most instructions come through here
     def method_missing(name, *args)
       klass = Bytecode.const_get(Bytecode.camel_case(name))
-      #raise "Unknown bytecode: #{name}" unless klass
       instruction = klass.new(*args)	
-      #print "#{instruction.bc_size} #{name}\n"
 
       add_instruction(instruction)	
+    end
+
+    def honouring_nil_asgns
+      @honour_nil_asgns_depth += 1
+      begin
+	yield
+      ensure
+	@honour_nil_asgns_depth -= 1
+      end
+    end
+
+    def honour_nil_asgns_p
+      @honour_nil_asgns_depth > 0
     end
 
     def compile
       return if @result # ie if previously compiled
 
-#      @handlers.compile_all()
-
       @result = []
 
       @code.each { |bc| bc.compile_into(@result) }
 
-      @result.each_with_index do |val, @current_pc|
-	if val.kind_of?(Instruction)
-	  patch = val.fixup(self, @current_pc)
-	  @result[ @current_pc .. @current_pc + patch.size - 1] = patch
-	end
-      end
-
-      num_locals = @code.map {|bc| bc.max_local_id}.max
-      @num_locals = num_locals ? num_locals + 1 : 0
+      # FIXME this actually uses 1 more local than necessary in many
+      # cases. The +1 is necessary for blocks, where all arguments are
+      # passed as a vector local 0, but this local is unnamed and so
+      # isn't known about by @locals
+      @num_locals = @locals.num_locals + 1
+      
+      @num_jump_data = @handlers.max_storage + 1
 
       @result
+    end
+
+    class JumpTarget
+      attr_reader :target
+      def initialize(writer)
+	@writer = writer
+      end
+      def place
+	@target = @writer.current_pc
+      end
     end
 
   end
@@ -172,12 +162,21 @@ module Bytecode
 	@local_id    = -1   # id of next local added to @locals will be this + 1
       end
 
+      public
+
       # Locals
       def register_local(local_name)
-	@locals[local_name] = (@local_id += 1)
+	if @create_in_parent
+	  # create in parent
+	  id, depth = parent.locals.register_local(local_name)
+	  return id, depth + 1
+	else
+	  # create in this frame
+	  id = (@local_id += 1)
+	  @locals[local_name] = id
+	  return id, 0
+	end
       end
-
-      public
 
       def register_locals(arg_names)
 	# Register a block of locals; used to ensure arguments to methods
@@ -185,6 +184,10 @@ module Bytecode
 	for arg in arg_names
 	  register_local(arg)
 	end            
+      end
+
+      def create_in_parent=(bool)
+	@create_in_parent = bool
       end
 
       class CantFindArgError < Exception; end
@@ -206,7 +209,20 @@ module Bytecode
       def find_or_make_local(local_name)
 	find_local(local_name)
       rescue CantFindArgError
-	return register_local(local_name), 0
+	return register_local(local_name)
+      end
+
+      def store_to_local_called(local_name)
+	local_id, depth = find_or_make_local(local_name)
+	if depth == 0
+	  @writer.st_loc(local_id)
+	else
+	  @writer.st_loc_l(local_id, depth)
+	end
+      end
+
+      def num_locals
+	@locals.size
       end
     end
   end
@@ -260,18 +276,19 @@ module Bytecode
 	
 	def initialize(w)
 	  super
-	  @before_condition = w.labels.new("before_cond")
-	  @after_condition  = w.labels.new("after_cond")
-	  @out              = w.labels.new("out")
+	  @before_condition = w.new_label 
+	  @after_condition  = w.new_label 
+	  @out              = w.new_label 
 	end
 	def break
-	  @writer.goto(@out)
+	  # pop to get rid of break value, which we can't handle yet
+	  @writer.pop.goto_e(@out)
 	end
 	def next
-	  @writer.goto(@before_condition)
+	  @writer.goto_e(@before_condition)
 	end
 	def redo
-	  @writer.goto(@after_condition)
+	  @writer.goto_e(@after_condition)
 	end
       end
 
@@ -283,95 +300,58 @@ module Bytecode
 	  @writer.ld_imm(nil).return(0)
 	end
 	def redo
-	  @writer.goto(@redo_label)
+	  @writer.goto_e(@redo_label)
 	end
 	def redo_label
-	  @redo_label = @writer.labels.new("redo")
-	  @writer.label(@redo_label)
+	  @redo_label = @writer.new_label 
+	  @redo_label.place
 	end
       end
 
     end
   end
 end
-
-
-module Bytecode
-  class Writer
-    class LabelManager < Manager
-
-      def initialize(writer)
-	super
-
-	@labels      = {}   # map from label to instruction offset
-	@used_labels = []   
-      end
-
-      def label(name, current_pc)
-	@labels[name] = current_pc
-      end
-
-      def offset_for_label(name)
-	offset = @labels[name] or raise "No such label #{name}"
-	return offset - writer.current_pc
-      end
-
-      def new(name = "1")
-	# Return a new, unique label
-	while @used_labels.find {|l| name == l}
-	  name = name.succ
-        end
-	@used_labels.push(name)
-	name
-      end
-
-    end
-  end
-end
-
-
-
-
-
-
 
 
 module Bytecode
   class Writer
 
     class HandlerManager < Manager
+      attr_accessor :storage
+      attr_reader   :max_storage
       def initialize(writer)
 	super
-	@stack    = [] # tracks the nesting structure of rescue clauses
 	@handlers = [] # final list of all handlers
+	@storage = -1
+	@max_storage = 0
       end
 
-      def with_handler_context(handler_class, node)
-	return unless node
-	handler = handler_class.new(writer)
-	@stack.push(handler)
-	node.compile_for_value(writer)
-	@stack.pop
-	handler.end()
+      def setup_storage
+	@storage += 1
+	@max_storage = @storage if @storage > @max_storage
+	yield @storage
+	@storage -= 1
+      end
+
+      def with_handler(handler_class)
+	handler = nil 
+	setup_storage do |storage|
+	  handler = handler_class.new(writer, storage)
+	  yield handler
+	  handler.end()
+	end
+
 	@handlers.push(handler)
+
 	return handler
       end
 
-      def rescue(head, zelse, resque)
-#	if !head
-#	  zelse.compile_for_value(writer) if zelse
-#	  return
-#	end
-	no_exception_label = writer.labels.new("no_exception")
-	handler = with_handler_context(Handler, head)
+      def with_rescue_handler(&p)
+	with_handler(RescueHandler, &p)
+      end
 
-	zelse.compile_for_value(writer) if zelse
-	writer.goto(no_exception_label)
-
-	handler.set_handler_pc()
-	resque.compile_for_value(writer, no_exception_label) if resque
-
-	writer.label(no_exception_label)
+      def with_ensure_handler(&p)
+	with_handler(EnsureHandler, &p) 
       end
 
       def to_s
@@ -381,19 +361,45 @@ module Bytecode
       end
 
       class Handler
-        attr_reader :start_pc, :end_pc, :handler_pc
-	def initialize(writer)
-	  @writer = writer
-	  @start_pc = writer.current_pc
+	# must match declarations in C
+	HANDLER_TYPE_RESCUE = 1
+	HANDLER_TYPE_ENSURE = 2
+        attr_reader :start_pc, :end_pc, :handler_pc, :storage
+	def initialize(writer, storage, handler_type)
+	  @writer   = writer
+	  @handlers = writer.handlers
+	  @storage  = storage
+	  @handler_type = handler_type
+
+	  @writer.hbody_enter(@storage)
+	  @start_pc = @writer.current_pc
 	end
 	def end()
 	  @end_pc = @writer.current_pc
 	end
-	def set_handler_pc()
+
+	def in_handler(&p)
+	  raise 'Handler already provided.' if @handler_pc
+
 	  @handler_pc = @writer.current_pc
+
+	  @handlers.setup_storage(&p) 
 	end
+
 	def to_s
-	  "#{type.name}: #{start_pc} - #{end_pc} jumping to #{handler_pc}"
+	  "#{self.class.name}: #{start_pc} - #{end_pc} jumping to #{handler_pc}"
+	end
+      end
+
+      class RescueHandler < Handler
+	def initialize(writer, storage)
+	  super(writer, storage, HANDLER_TYPE_RESCUE)
+	end
+      end
+
+      class EnsureHandler < Handler
+	def initialize(writer, storage)
+	  super(writer, storage, HANDLER_TYPE_ENSURE)
 	end
       end
     end

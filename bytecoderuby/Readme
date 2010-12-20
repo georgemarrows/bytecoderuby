@@ -1,88 +1,91 @@
 ByteCodeRuby
 ============
-Version:      0.1.3
-Release date: 2002-12-17
-Author:       George Marrows, triptych@ntlworld.com
+Version:      0.2.0
+Release date: 2003-11-16
+Author:       George Marrows, george.marrows@ntlworld.com
 
 
-What is it?
------------
+What is it
+----------
 A bytecode interpreter for Ruby. Standard Ruby produces a parse tree from your source code and then interprets the parse tree directly. ByteCodeRuby inserts some additional steps: it takes Ruby's parse tree and compiles it to bytecode, ie the instruction set for a virtual machine. It then interprets the bytecode. The hope is that eventually this approach will lead to improved performance for the Ruby interpreter.
 
-It consists of a (minor) patch to Ruby 1.6.7's eval.c, ruby.h and node.h, a C extension and some Ruby code. It's currently at an experimental stage (you won't be able to run your favourite Ruby script with it), but it can nonetheless compile and run a fairly large (and increasing) subset of Ruby.
+It consists of a C extension, some Ruby code and a (fairly minor) patch to Ruby 1.8.0's eval.c, gc.c, ruby.h and node.h. It's currently at an experimental stage (you won't be able to run your favourite Ruby script with it), but it can nonetheless compile and run a fairly large (and increasing) subset of Ruby.
 
 
 Why?
 ----
-
 - to satisfy my curiosity about virtual machines and bytecode interpreters
 
 - to (eventually) provide improved performance for Ruby, while maintaining the substantial investment in the current Ruby virtual machine.
 
 
-Installation?
--------------
+Installation
+------------
  1. unpack tarball (if you haven't already)
 
- 2. compile and install Ruth
-    a. cd ruth-0.8.0
-    b. ruby helpers/make.rb
-    c. ruby helpers/install.rb
+ 2. compile and install Ruth:
+    a. cd ruth-0.10.0
+    b. patch -p1 -b <bytecoderuby-0.2.0/patch-ruth-0.10
+       -p use directories
+       -b ensures that the originals of altered files are backed up 
+       with extension .orig
+       [this patch is only needed to allow break to return a value]
+    c. ruby helpers/make.rb
+    d. ruby helpers/install.rb
 
- 3. patch Ruby 1.6.7
-    a. copy bytecoderuby-0.1.3/patch-1.6.7 to your Ruby 1.6.7 build area 
+ 3. patch Ruby 1.8.0:
+    a. copy bytecoderuby-0.2.0/patch-1.8.0 to your Ruby 1.8.0 build area 
        (ie in the same directory as eval.c etc)
     b. cd into that directory
-    c. patch -b <patch-1.6.7  
+    c. patch -b <patch-1.8.0
        -b ensures that the originals of altered files are backed up 
        with extension .orig
     d. make install
 
- 4. compile and run ByteCodeRuby
-    a. cd bytecoderuby-0.1.3
-    b. ruby extconf.rb
-    c. make
-    d. ruby tests/testByteCodeRuby.rb to try it out
+ 4. compile and run ByteCodeRuby:
+    a. cd bytecoderuby-0.2.0
+    b. cd ext/bcr ; ruby extconf.rb ; make ; cd ../..
+    c. ruby test/testByteCodeRuby.rb to try it out
 
 
-Example of use?
----------------
-See tests/testByteCodeRuby.rb (unit tests for compilation and evaluation)
+Example of use
+--------------
+See test/testByteCodeRuby.rb (unit tests for compilation and evaluation)
 
 
-Requirements?
--------------
-ByteCodeRuby uses Robert Feldt's Ruth wrapper round the standard Ruby parser, version 0.8.0. Ruth is included in the ByteCodeRuby download.
+Requirements
+------------
+ByteCodeRuby uses Robert Feldt's Ruth wrapper round the standard Ruby parser, version 0.10.0. Ruth is included in the ByteCodeRuby download.
 
-ByteCodeRuby 0.1.3 has been tested on the following set-ups:
+ByteCodeRuby 0.2.0 has been tested on the following platforms:
 
-  * Linux with Ruby 1.6.7 and gcc version 2.96 20000731
+  * Linux with Ruby 1.8.0 and gcc version 2.96 20000731
 
-An earlier version was tested successfully on Windows 2000 Pro with Ruby 1.6.5, cygwin and gcc version 2.95.3-1
+A much older version was tested successfully on Windows 2000 Pro with Ruby 1.6.5, cygwin and gcc version 2.95.3-1
 
 It may work on other platforms, but I can't guarantee it. I'd be very grateful
 to anyone who was willing to try it on another platform and let me know the
 results.
 
 
-Documentation?
---------------
+Documentation
+-------------
 Very little yet. There's some fragments of information on the bytecode instruction set at the top of bytecode.rb.
 
 
-License and legal issues?
--------------------------
+License and legal issues
+------------------------
 All files in this package are copyrighted free software.
 
-Copyright (c) 2001, 2002 George Marrows
+Copyright (c) 2001 - 2003 George Marrows
 All rights reserved.
 
 and they are distributed under the same terms as Ruby itself.
 
 
-Special things to note?
------------------------
-- This is currently a quick and dirty hack. I haven't yet given *any* consideration to avoiding memory leaks etc.
+Special things to note
+----------------------
+- I haven't yet given much consideration to avoiding memory leaks etc.
 
 - There's very little in the way of checking that the bytecode you've specified is sensible. Get it wrong and your process will hang or crash.
 
@@ -98,12 +101,11 @@ See Todo.
 
 Acknowledgements
 ----------------
-Thanks to Matz for producing such a clean and easy to understand interpreter.
+Matz - for producing such a clean and easy to understand interpreter.
 
-Thanks to Robert Feldt, for producing Ruth and hosting this under his RubyVM project at SourceForge.
+Robert Feldt - for producing Ruth and hosting this under his RubyVM project at SourceForge.
 
-George Marrows, triptych@ntlworld.com
-
-
+Mark Wassell - for until loops & class variables.
 
 
+George Marrows, george.marrows@ntlworld.com

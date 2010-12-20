@@ -1,4 +1,4 @@
-require 'bytecode.rb'
+require 'bcr/bytecode.rb'
 
 =begin
 Various additions to the simple classes defined in bytecode.rb 
@@ -14,7 +14,7 @@ module Bytecode
   class Instruction
     def compile_into(code_vector)
       code_vector << bc_code
-      @args.each { |arg| code_vector << (arg || 0) }
+      @args.each { |arg| code_vector << arg }
     end
     def bc_size
       bc_num_args + 1
@@ -36,20 +36,8 @@ module Bytecode
 
   # Additions/changes to other instructions
   module BranchInstruction
-    def compile_into(code_vector)
-      unless offset.kind_of?(Fixnum)
-        code_vector << self << :dummy
-      else
-        code_vector << bc_code << offset
-      end
-    end
-    def fixup(code_vector, current_pc)
-      relative_tgt = code_vector.labels.offset_for_label(offset)
-      @absolute_tgt = current_pc + relative_tgt
-      return [bc_code, relative_tgt]
-    end
     def to_s
-      "#{type.name}\t#{@absolute_tgt}"
+      "#{self.class.name}\t#{offset.target}"
     end	    
   end
 
@@ -89,6 +77,3 @@ module Bytecode
 
 end
 
-if $0 == __FILE__
-  Bytecode.make_c_header("bc_runner.h")
-end

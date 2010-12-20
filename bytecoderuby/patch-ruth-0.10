@@ -1,0 +1,11 @@
+--- ruth-0.10/ext/ruby/interpreter/node_specifications.rb	Fri Aug 22 13:37:49 2003
++++ ruth-0.10.hack/ext/ruby/interpreter/node_specifications.rb	Fri Oct 24 23:50:12 2003
+@@ -16,7 +16,7 @@
+       "BLOCK_ARG"   => [[:count, :long], [:variable_id, :ID]],
+       "BLOCK_PASS"  => [[:body, :RNode], [:iter, :RNode]],
+       "BMETHOD"     => [[:cval, :VALUE]],
+-      "BREAK"       => [],
++      "BREAK"       => [[:stts, :RNode]],
+       "CALL"        => [[:receiver, :RNode], [:method_id, :ID], [:args, :RNode]],
+       "CASE"        => [[:head, :RNode], [:body, :RNode]],
+       "CDECL"       => [[:variable_id, :ID], [:value, :RNode]],
