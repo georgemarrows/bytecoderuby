@@ -1,0 +1,16 @@
+#define GOTO 10
+#define CALL 8
+#define LD_LOC_L 3
+#define LD_IMM 1
+#define DEFN 14
+#define RETURN 9
+#define POP 7
+#define LD_LOC 2
+#define YIELD 13
+#define DUP 6
+#define IF_NOT 12
+#define ST_LOC_L 5
+#define BREAK 16
+#define ARY_SCATTER 15
+#define IF 11
+#define ST_LOC 4

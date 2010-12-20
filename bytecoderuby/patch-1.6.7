@@ -1,0 +1,99 @@
+--- ../ruby-1.6.5/eval.c	Tue Sep 18 05:47:02 2001
++++ ../ruby-1.6.5.hack/eval.c	Fri Jan 11 22:30:18 2002
+@@ -252,7 +252,7 @@
+     return body;
+ }
+ 
+-static NODE*
++NODE*
+ rb_get_method_body(klassp, idp, noexp)
+     VALUE *klassp;
+     ID *idp;
+@@ -4194,7 +4194,7 @@
+ #endif
+ }
+ 
+-static VALUE
++VALUE
+ call_cfunc(func, recv, len, argc, argv)
+     VALUE (*func)();
+     VALUE recv;
+@@ -4354,6 +4354,27 @@
+ 	    }
+ 	}
+ 	break;
++      case NODE_BFUNC:
++	{
++	    VALUE cRunner;
++	    ID run_method_id;
++
++	    int len = body->nd_argc;
++	    if (len < 0 || argc != len) {
++	      rb_raise(rb_eArgError, "wrong # of arguments(%d for %d)",
++		       argc, len);
++	    }
++
++	    /* Hack alert! */
++	    cRunner = rb_const_get(rb_cObject, rb_intern("Bytecode"));
++	    cRunner = rb_const_get(cRunner,    rb_intern("Runner"));
++	    run_method_id = rb_intern("run");
++
++	    result = rb_funcall(cRunner, run_method_id, 4, 
++				body->nd_cfnc, recv, argc, argv);
++
++	}
++	break;
+ 
+ 	/* for attr get/set */
+       case NODE_IVAR:
+@@ -4517,7 +4538,39 @@
+     return result;
+ }
+ 
+-static VALUE
++NODE *
++rb_get_method_body_in_cache(klass, recv, mid, argc, argv, scope)
++    VALUE klass, recv;
++    ID    mid;
++    int argc;			/* OK */
++    VALUE *argv;		/* OK */
++    int scope;
++{
++    NODE  *body;		/* OK */
++    int    noex;
++    ID     id = mid;
++    struct cache_entry *ent;
++
++    if (!klass) {
++	rb_raise(rb_eNotImpError, "method call on terminated object");
++    }
++    /* is it in the method cache? */
++    ent = cache + EXPR1(klass, mid);
++    if (ent->mid == mid && ent->klass == klass) {
++      if (!ent->method)
++	/* FIXME this isn't right! */
++	return rb_undefined(recv, mid, argc, argv, scope==2?CSTAT_VCALL:0);
++      klass = ent->origin;
++      id    = ent->mid0; // FIXME - don't understand this yet
++      noex  = ent->noex;
++      body  = ent->method;
++      return body;
++    } else {
++      return 0;
++    }
++}
++
++VALUE
+ rb_call(klass, recv, mid, argc, argv, scope)
+     VALUE klass, recv;
+     ID    mid;
+--- ../ruby-1.6.5/node.h	Fri Apr  6 07:42:40 2001
++++ ../ruby-1.6.5.hack/node.h	Mon Dec 17 22:28:06 2001
+@@ -121,6 +121,7 @@
+     NODE_DMETHOD,
+     NODE_BMETHOD,
+     NODE_MEMO,
++    NODE_BFUNC,
+     NODE_LAST
+ };
+ 

@@ -1,0 +1,125 @@
+ByteCodeRuby
+============
+Version:      0.1.1
+Release date: 2002-03-17
+Author:       George Marrows, triptych@ntlworld.com
+
+What is it?
+-----------
+The beginnings of a bytecode interpreter for Ruby. I'd guess that support for the syntax of the Ruby language is perhaps 30% done. Overall support for the Ruby platform (ie language + those library methods requiring VM cooperation) is at perhaps 15%
+
+It consists of a (minor) patch to Ruby 1.6.7's eval.c and node.h, a C extension
+and some Ruby code. It's currently at an experimental stage: you won't be able to run your favourite Ruby script with it, but you can compile a subset of Ruby to bytecode, and then run the bytecode. The subset covers:
+  method calls (must be either C or bytecode methods)
+  method definition ('standard' arguments only - no optional, * or & args)
+  local variables
+  return
+  if .. else
+  while, next, break, redo
+  blocks with method calls
+  next, break, redo for blocks
+  multiple assignment
+  and, or
+
+
+Why?
+----
+
+- to satisfy my curiosity about virtual machines and bytecode interpreters
+
+- to (eventually) provide improved performance for Ruby, while maintaining the substantial investment in the current Ruby virtual machine.
+
+
+Installation?
+-------------
+ 1. unpack tarball (if you haven't already)
+
+ 2. compile and install Ruth
+    a. cd ruth-0.8.0
+    b. ruby helpers/make.rb
+    c. ruby helpers/install.rb
+
+ 3. patch Ruby 1.6.7
+    a. copy bytecoderuby-0.1.1/patch-1.6.7 to your Ruby 1.6.7 build area 
+       (ie in the same directory as eval.c etc)
+    b. cd into that directory
+    c. patch -b <patch-1.6.7  
+       -b ensures that the originals of altered files are backed up 
+       with extension .orig
+    d. make install
+
+ 4. compile and run ByteCodeRuby
+    a. cd bytecoderuby-0.1.1
+    b. ruby extconf.rb
+    c. make
+    d. ruby tests/testByteCodeRuby.rb to run the unit tests (needs RubyUnit)
+
+
+Example of use?
+---------------
+See:
+- tests/testByteCodeRuby.rb (unit tests for compilation and evaluation)
+- example.rb (uses bytecode assembly language) 
+
+
+Requirements?
+-------------
+ByteCodeRuby uses Robert Feldt's Ruth wrapper round the standard Ruby parser, version 0.8.0. Ruth is included in the ByteCodeRuby download.
+
+You'll need RubyUnit to run the unit tests - I used version 0.4.4.
+
+ByteCodeRuby 0.1.1 has been tested on the following set-ups:
+
+  * Linux with Ruby 1.6.7 and gcc version 2.96 20000731
+
+The previous version (0.1.0) worked OK with:
+
+  * Windows 2000 Pro with Ruby 1.6.5, cygwin and gcc version 2.95.3-1
+
+It may work on other platforms, but I can't guarantee it. I'd be very grateful
+to anyone who was willing to try it on another platform and let me know the
+results.
+
+
+Documentation?
+--------------
+Very little yet. There's some fragments of information on the bytecode instruction set at the top of bytecode.rb.
+
+
+License and legal issues?
+-------------------------
+All files in this package are copyrighted free software.
+
+Copyright (c) 2001, 2002 George Marrows
+All rights reserved.
+
+and they are distributed under the same terms as Ruby itself.
+
+
+Special things to note?
+-----------------------
+- This is currently a quick and dirty hack. I haven't yet given *any* consideration to avoiding memory leaks etc.
+
+- There's very little in the way of checking that the bytecode you've specified is sensible. Get it wrong and your process will hang or crash.
+
+- I'm trying to keep the bytecode interpreter as an extension for as long as possible - the code/compile/test cycle's a lot quicker that way.
+
+- No optimisations until it all works. There are a *lot* of possible optimisations (some are listed in the Todo), but I want to resist doing any of them until the interpreter can run Ruby properly.
+
+
+Plans for the future?
+---------------------
+See Todo.
+
+
+Acknowledgements
+----------------
+Thanks to Matz for producing such a clean and easy to understand interpreter (though I haven't got round to looking at all those stacks of jmp_bufs yet..)
+
+Thanks to Robert Feldt, for producing Ruth and hosting this under his RubyVM project at SourceForge.
+
+George Marrows, triptych@ntlworld.com
+
+
+
+

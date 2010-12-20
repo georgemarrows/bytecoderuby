@@ -1,0 +1,23 @@
+Since 0.1.0
+-----------
+- fix to allow arguments to be passed to bytecode methods
+- compile method definitions with 'normal' (ie not optional, rest or block) arguments
+- correctly compile expressions for value and statements for void
+- compile 'if .. else'
+- compile Fcall nodes (seem to be call to self)
+- compile &&, and, ||, or
+- break, next, redo now work for while loops
+- multiple assignments
+- argument count checks on calls to bytecode methods 
+  (doesn't yet take account of optional or rest args)
+- multiple assignment from method results
+- blocks can be passed to methods and yielded to
+- break, next, redo for blocks
+- access to self from inside blocks
+- access to locals created inside blocks
+- return from inside blocks
+- simple benchmarking comparison 
+  (try eg ruby tests/testByteCodeRuby.rb -bench testIf)
+- allocate call frames from a stack rather than the heap
+- calling yield from within a block now works
+- rebase on Ruby 1.6.7

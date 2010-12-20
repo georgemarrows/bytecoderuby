@@ -1,0 +1,90 @@
+Ruby language support
+=====================
+- local variables
+- frames
+* methods
+	- definition
+	- call stack; call bytecode methods from bytecode methods
+	- arguments
+	* scatter, gather, optional args
+	- multiple results
+* instance variables
+* call
+	* trap no such method errors
+	* test for -2 argc methods
+* blocks
+	- pass blocks
+	- yield
+	- next, break, redo, return
+	* retry
+	- dynamic local variables
+	* pass blocks to C functions
+* class, module definitions
+* singleton methods
+* exceptions: rescue, ensure
+* throw, catch
+* global variables
+
+Ruby library support
+====================
+* blocks -> procs
+* procs <-> methods
+* blocks -> methods
+* eval and friends
+* bindings
+* method_missing
+* set_trace_func
+* backtrace
+* threads
+* continuations
+* rb_frame_last_func (see rb_num_coerce_bin)
+
+Compiler
+========
+All the above plus:
+- allow methods to take arguments
+* not
+- array literals
+* hash literals
+* range literals
+* range flip-flops
+* $_ (or does this belong in language support above?)
+- while
+* unless
+* until
+- next, redo, break in while and until loops
+- allow blocks to be defined and yielded to
+- multiple assignment
+* tests for block arg options (scatter, gather etc)
+
+Interpreter infrastructure
+==========================
+- declare bytecode format in Ruby
+- Bytecode::Writer should calculate number of locals
+* memory leaks
+* per-frame stacks?
+* bytecode dump and load
+* string, integer literals
+* experiment with registers and arg sets rather than stack?
+
+Other guff
+==========
+- make Writer pretty print itself so eg blocks are indented
+- move to Ruby 1.6.7
+* move to Ruby 1.7
+* change compilation options to use -Wall or similar
+* write C case statements for bytecode from Ruby?
+
+Possible future optimisations
+=============================
+- optimise frames
+	- allocate locals 'inline' with struct frame
+	- allocate frames from a linear stack where possible (eg no block calls)
+* inline various interpreter C functions
+* threaded bytecode dispatch
+* optimise a, b = b, a etc to not go through an intermediate array
+* optimise similar case for yield to not go through an array
+* static optimisation of bytecodes
+* macro bytecodes (dynamic optimisation)
+* method lookup using displays
+* bytecode for inline method dispatch on calls (though maybe swamped by bytecode dispatch overhead)
