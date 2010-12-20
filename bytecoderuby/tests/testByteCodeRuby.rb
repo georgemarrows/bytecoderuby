@@ -8,60 +8,11 @@ require 'compile'
 # FIXME necessary until we get GC integrated properly
 GC.disable
 
-# Methods
-src = <<-EORUBY
-  def single_result
-    1
-  end
-  def multiple_results
-    return 1, 2, 3
-  end
-  def multiple_results_star
-    z = [2,3]; return 1, *z
-  end
-  def args(a, b, c)         
-    return [a, b, c]
-  end
-  def yield_void
-    i = 1; while i <= 4; yield i; i += 1; end
-  end
-  def yield_value(a)                 
-    i = 1
-    while i <= 4
-      a << (yield i)
-      i += 1
-    end
-    a
-  end
-  def yield_yield
-    yield_void do |x| yield x; end
-  end
-  def return_test
-    yield_void do |x| 
-      yield_void do |y| 
-	if x + y == 6 then return :a; end
-      end
-    end
-    return :b
-  end
-  def retry_helper(a)
-    a << :a
-    self
-  end
-EORUBY
-
-# Native Ruby class
-mri_src = "class MRITestClass; #{src}; end"
-eval(mri_src)
-
-# BCR class
-# create the class 'cos BCR can't do it for itself currently
-class BCRTestClass; end; 
-bcr_src = "class BCRTestClass; #{src}; end"
-Bytecode.compile_and_run_for_void(bcr_src)
-
+# Create the class 'cos BCR can't do it for itself currently
+class BCRTestClass; end
 
 class TestByteCodeRuby < RUNIT::TestCase
+
 
   def value_of(src)
     Bytecode.compile_and_run_for_return(src)
@@ -108,42 +59,63 @@ class TestByteCodeRuby < RUNIT::TestCase
       results(mri_loop_src, bcr_loop_src, src)
     end
   else
-    def compare(src)
+    def compare(mri_src, bcr_src = mri_src, print_src = mri_src)
       # ensure MRI and BCR return the same result when 
-      # Ruby code SRC is run
-      assert_equal( eval(src), v = value_of(src) )
-      #puts "'#{src}' has value #{v.inspect}"
+      # they run MRI_SRC and BCR_SRC. PRINT_SRC is the src code
+      # to print, if result printing is turned on.
+
+      begin
+	mri_val = eval mri_src
+      rescue Exception => mri_val
+      end
+
+      begin
+	bcr_val = value_of bcr_src
+      rescue Exception => bcr_val
+      end      
+
+      print = false
+#      print = true
+
+      if print
+	puts "\n#{print_src}"
+	puts " ==> #{mri_val.inspect}"
+	puts " ==> #{bcr_val.inspect}"
+	# only print backtrace if compilation error
+	if Exception === bcr_val
+	   if bcr_val.backtrace.find {|l| /compile_for/.match(l)}
+	    puts bcr_val.backtrace 
+	  end
+	end
+      end
+
+      if Exception === mri_val
+	# slice off line numbers etc from MRI exceptions cos BCR doesn't do these yet
+	mri_msg = /: ([^:]*)$/.match(mri_val.message)[1]
+	assert_equal( mri_val.class, bcr_val.class )
+	assert_equal( mri_msg,       bcr_val.message )
+      else
+	# no exception
+	assert_equal( mri_val, bcr_val )
+      end
     end
     def compare_method(src)
       # ensure MRI and BCR return the same result when 
       # the Ruby method call SRC is run
-      mri_val = eval     "obj = MRITestClass.new; #{src}"
-
-#      print "Value is #{mri_val.inspect}\n"
-      bcr_val = value_of "obj = BCRTestClass.new; #{src}"
-
-
-      assert_equal( mri_val, bcr_val )
+      compare("obj = MRITestClass.new; #{src}",
+	      "obj = BCRTestClass.new; #{src}",
+	      src)
     end
   end
 
-
-  def compare_method_exception(src)
-    # ensure MRI and BCR raise the same exception when
-    # the Ruby method call SRC is run
-    begin
-      mri_val = eval "obj = MRITestClass.new; #{src}"
-    rescue Exception => mri_exception
-    end
-    begin
-      bcr_val = value_of "obj = BCRTestClass.new; #{src}"
-    rescue Exception => bcr_exception
-    end
-    #print "Value is #{mri_exception.inspect}\n"
-    assert(mri_exception != nil)
-    assert_equal( mri_exception.class,   bcr_exception.class)
-    # Won't worry too much about message at the moment
-#    assert_equal( mri_exception.message, bcr_exception.message )
+  def add_test_methods(src)
+    # Native Ruby class
+    mri_src = "class MRITestClass; #{src}; end"
+    eval(mri_src)
+    
+    # BCR class
+    bcr_src = "class BCRTestClass; #{src}; end"
+    Bytecode.compile_and_run_for_void(bcr_src)
   end
 
   def testLiterals
@@ -177,10 +149,51 @@ class TestByteCodeRuby < RUNIT::TestCase
     end
   end
 
-  def testCalls
+  def testCCalls
+    # tests calls to C methods
+
+    add_test_methods <<-EORUBY
+      def bloo
+	# loop tests BCR's reuse of the stack
+	i = 10000
+	while i > 0
+	  a = "%s" % self
+	  i -= 1
+	end
+	a
+      end
+      def to_s
+	"blah"
+      end
+    EORUBY
+
+    # bytecode -> C
     compare '1+2'
     compare '"abc".size'
-    # FIXME need more here!
+
+    # bytecode -> C -> bytecode method calls
+    compare_method '"%s" % obj'
+    compare_method 'z = "abc"; obj.bloo + z'
+    compare_method 'z = "abc"; z + obj.bloo'
+
+    # bytecode -> C -> bytecode yields
+    compare '[1,2,3].each'        # local jump error
+    compare '[1,2,3].each {}'     # test return value with block
+    compare 'a = []; [1,2,3].each                { |b| a.unshift(b) }; a'
+    compare 'a = []; "abc".scan(Regexp.new(".")) { |b| a.unshift(b) }; a'  # uses rb_block_given_p
+
+    # ditto, returning result to C
+    compare '"abc".gsub(Regexp.new(".")) { |a| a + "-"}'
+
+    compare <<-EORUBY
+      a = []
+      [1,2,3].each { |x|
+	[4,5,6].each { |y|
+	  a << x << y
+	}
+      }
+      a
+    EORUBY
   end
 
   def testIf
@@ -284,7 +297,7 @@ class TestByteCodeRuby < RUNIT::TestCase
 
   end
 
-  def testOrAnd
+  def testOrAndNot
     compare '1     || 2'
     compare 'true  || 2'
     compare 'nil   || 2'
@@ -302,6 +315,13 @@ class TestByteCodeRuby < RUNIT::TestCase
     
     compare 'i = 1; true  && (2*(i=2)); i'   # => 2
     compare 'i = 1; false && (2*(i=2)); i'   # => 1
+
+    compare 'not true'
+    compare 'not false'
+    compare '!true'
+    compare '!false'
+    compare '!nil'
+    compare '!123'
   end
 
   def testMultipleAssignment
@@ -344,33 +364,96 @@ class TestByteCodeRuby < RUNIT::TestCase
     #compare 'a = *[*[1]]; a'
     #compare 'a = *[*[1]]'
 
+    # FIXME obj.ivar= on lhs of multiple assignment
   end
 
 
   def testMethods
+    add_test_methods <<-EORUBY
+      def single_result
+	1
+      end
+      def multiple_results
+	return 1, 2, 3
+      end
+      def multiple_results_star
+	z = [2,3]; return 1, *z
+      end
+      def arg(a)
+	a
+      end
+      def args(a, b, c)         
+	return [a, b, c]
+      end
+    EORUBY
+
     compare_method 'obj.single_result'    
 
     compare_method 'obj.multiple_results'    
     compare_method 'x,  y = obj.multiple_results; [[x], [y]]'    
     compare_method 'x, *y = obj.multiple_results; [[x], [y]]' 
-
+      
     compare_method 'obj.multiple_results_star'
-    
+
+    compare_method 'obj.arg(1)'
+    compare_method 'obj.arg(*[1])'
+
     compare_method 'obj.args(1, 2, 3)'
-    # Argscat  compare_method 'obj.args(1, *[2, 3])'
-    # Argscat  compare_method 'z = [2, 3]; obj.args(1, *z)'
-    # Restargs compare_method 'obj.args(*[1, 2])'
+    compare_method 'obj.args(1, *[2, 3])'
+    compare_method 'z = [2, 3]; obj.args(1, *z)'
+    compare_method 'obj.args(*[1, 2, 3])'
 
     # calling C methods with too many / too few args
-    compare_method_exception '"abc".tr("a", "b", "c")'
-    compare_method_exception '"abc".tr("a")'
+    compare_method '"abc".tr("a", "b", "c")'
+    compare_method '"abc".tr("a")'
 
     # calling Ruby methods with too many / too few args
-    compare_method_exception 'obj.args(1, 2, 3, 4)'
-    compare_method_exception 'obj.args(1, 2)'
+    compare_method 'obj.args(1, 2, 3, 4)'
+    compare_method 'obj.args(1, 2)'
+  end
 
-    # call yielding method without passing in a block
-    compare_method_exception 'obj.yield'
+  def testArgs
+    add_test_methods <<-EORUBY
+      def args_rest(*r)
+	r
+      end
+      def args_optional(o=5, p=6, q=o+p)
+        [[o], [p], [q]]
+      end
+      def args_optional_rest(o=5, p=6, q=o+p, *r)
+        [[o], [p], [q], [r]]        
+      end
+      #def args_normal
+      #end
+      def args_normal_rest(n, *r)
+	[[n], [r]]
+      end
+      def args_normal_optional(n, o=5, p=6, q=n+o+p)
+        [[n], [o], [p], [q]]        
+      end
+      def args_normal_optional_rest(n, o=5, p=6, q=n+o+p, *r)
+	[[n], [o], [p], [q], [r]]       
+      end
+    EORUBY
+      
+    args    = [1,2,3,4,5]
+    methods = ['rest', 'optional', 'optional_rest', 'normal_rest',
+               'normal_optional', 'normal_optional_rest']
+    split = 2
+
+    methods.each do |method|
+      call = "obj.args_#{method}"
+      (0 .. args.size).each do |i|
+	a = args[0, i].join(',')
+	compare_method "#{call}(   #{a}  )"
+	compare_method "#{call}(*[ #{a} ])"
+	if i >= split
+	  a = args[0,     split  ].join(',')
+	  b = args[split, i-split].join(',')
+	  compare_method "z=[#{b}]; #{call}( #{a}, *z )"
+	end
+      end 
+    end
   end
 
   def testBlocks
@@ -379,6 +462,30 @@ class TestByteCodeRuby < RUNIT::TestCase
     # * arguments: none, multiple, gather, scatter
     # - access & assign to vars from enclosing scope
     # - nested blocks
+
+    add_test_methods <<-EORUBY
+      def yield_void
+	i = 1; while i <= 4; yield i; i += 1; end
+      end
+      def yield_value(a)                 
+	# also tests yield from inside a block
+	yield_void { |i| a << (yield i) }
+	a
+      end
+      def yield_args
+	yield 1, 2
+      end
+      def return_test
+	yield_void do |x| 
+	  yield_void do |y| 
+	    if x + y == 6 then return :a; end
+	  end
+	end
+	return :b
+      end
+    EORUBY
+
+    compare_method 'obj.yield_void'
 
     compare_method 'a=[]; obj.yield_void {     a << 9 }; a'    
     compare_method 'a=[]; obj.yield_void { |x| a << x }; a'
@@ -393,7 +500,20 @@ class TestByteCodeRuby < RUNIT::TestCase
     compare_method 'obj.yield_value([]) { |x|       }'
     compare_method 'obj.yield_value([]) {           }'
 
-    compare_method 'a=[]; obj.yield_yield { |x| a << x }; a'
+
+    # FIXME bug in Ruth causes this to segv  
+    #compare_method 'obj.yield_args {||                 }'
+    compare_method 'obj.yield_args {                         }'
+    compare_method 'obj.yield_args {|*|                      }'
+    compare_method 'obj.yield_args {|a|      a               }'
+    compare_method 'obj.yield_args {|a,|     a               }'
+    compare_method 'obj.yield_args {|a,*|    a               }'
+    compare_method 'obj.yield_args {|*a|     a               }'
+    compare_method 'obj.yield_args {|a,b|    [[a], [b]]      }'
+    compare_method 'obj.yield_args {|a,b,|   [[a], [b]]      }'
+    compare_method 'obj.yield_args {|a,*b|   [[a], [b]]      }'
+    compare_method 'obj.yield_args {|a,b,c|  [[a], [b], [c]] }'
+    compare_method 'obj.yield_args {|a,b,*c| [[a], [b], [c]] }'
 
     # nested blocks and access/assignment to vars created in a block
     compare_method <<-EORUBY
@@ -419,10 +539,10 @@ class TestByteCodeRuby < RUNIT::TestCase
       end
       a
     EORUBY
-  end
+#  end
 
-  def testBlockJumps
-    # * break, next, redo, retry, return
+#  def testBlockJumps
+    # - break, next, redo, return
     actions = ['', 'next', 'redo', 'break']
 
     simple_loop = <<-EORUBY
@@ -450,6 +570,13 @@ class TestByteCodeRuby < RUNIT::TestCase
 
 =begin
   def testBlockRetry
+    add_test_methods <<-EORUBY
+      def retry_helper(a)
+	a << :a
+	self
+      end
+    EORUBY
+
     #retry is hard - it reevaluates its sender :-(
     compare_method <<-EORUBY
       a = []
@@ -461,10 +588,296 @@ class TestByteCodeRuby < RUNIT::TestCase
     EORUBY
   end
 =end
-  #def testBlockWeird
-    # * test nexts etc in a value context - does stack break?
+
+  def testIvars
+    add_test_methods <<-EORUBY
+      def ivar= (val); @ivar = val;                  end
+      def ivar;        @ivar;                        end
+      def ivar_mult;   @a, @b = [1,2]; [[@a], [@b]]; end
+    EORUBY
+
+    compare_method 'obj.ivar = :xyz'
+    compare_method 'obj.ivar = :xyz; obj.ivar'
+    compare_method 'obj.ivar_mult'
+  end
+
+  def testCase
+    stmts = [ # match first clause, first item
+              %q{ case "abc"
+                  when String, Float; a = 1
+                  when String, Class; a = 2
+                  end },
+              # match later clause, later item
+              %q{ case "abc"
+                  when Integer, Class; a = 1
+                  when Float, String;  a = 2
+                  end },
+              # hit else
+              %q{ case "abc"
+                  when Integer; a = 1
+                  else        ; a = 2
+                  end },
+              # no match - fall through
+              %q{ case "abc"
+                  when Integer; a = 1
+                  end },
+              # empty when clause body
+              %q{ case "abc"
+                  when String
+                  end },
+              # nested statements
+              %q{ case "abc"
+                  when String
+                    case 123
+                    when String;  a = 1
+                    when Integer; a = 2    
+                    end
+                  end },
+            ]
+
+    stmts.each do |stmt|
+      compare stmt.gsub("a = ", "")    # test value context - remove assignments
+      compare "a = 0;#{stmt};a"        # test void context - initialise var
+    end
+
+    # Test order of evaluation of when clauses 
+    compare <<-EORUBY
+      a = []
+      case "abc"
+      when begin a << 1; Integer; end
+      when begin a << 2; String;  end
+      when begin a << 3; Float;   end
+      end
+      a   # should be [1,2] - only first two 'when' test values evaluated
+    EORUBY
+
+  end
+
+  # declare at top level
+  Object.class_eval do
+    class ParentError     < StandardError; end
+    class ChildError      < ParentError;   end
+    class GrandChildError < ChildError;    end
+  end
+
+  def testRescue
+
+    compare <<-EORUBY # test raising
+      raise ParentError
+    EORUBY
+
+    stmts = [
+      # no exception
+      %q{ begin; 1
+          rescue ParentError; 2
+          end },
+      # exception caught
+      %q{ begin; 1; raise ParentError; 2
+          rescue ParentError; 3
+          end },
+      # exception caught by superclass
+      %q{ begin; 1; raise ChildError; 2
+          rescue ParentError; 3
+          end },
+      # exception not caught by subclass
+      %q{ begin; 1; raise ParentError; 2
+          rescue ChildError; 3
+          end },
+      # exception caught by 2nd clause
+      %q{ begin; 1; raise ParentError; 2
+          rescue ChildError; 3
+          rescue ParentError; 4
+          end },
+      # nested, no exception
+      %q{ begin
+	    begin; 1
+            rescue ParentError; 2
+	    end
+          rescue ParentError; 3 
+          end },
+      # nested, matches inner
+      %q{ begin
+	    begin; 1; raise ChildError; 2
+	    rescue ChildError; 3
+	    end
+          rescue ParentError; 4
+          end },
+      # nested, matches outer
+      %q{ begin
+	    begin; 1; raise ParentError; 2
+	    rescue ChildError; 3
+	    end
+          rescue ParentError; 4
+          end },
+      # doubly nested, matches outer
+      %q{ begin
+	    begin
+	      begin; 1; raise ParentError; 2
+	      rescue GrandChildError; 3
+	      end
+	    rescue ChildError; 4
+	    end
+          rescue ParentError; 5
+          end },
+      # raise in rescue clause
+      %q{ begin
+	    1; raise ParentError; 2
+          rescue ParentError
+	    3; raise ChildError;  4
+          end },
+      # caught raise in rescue clause
+      %q{ begin
+	    1; raise ParentError; 2
+          rescue ParentError
+	    begin
+	      3; raise ChildError; 4
+	    rescue ChildError; 5
+	    end
+          end },
+      # uncaught raise in rescue clause
+      %q{ begin
+	    1; raise ParentError; 2
+          rescue ParentError
+	    begin
+	      3; raise ChildError; 4
+	    rescue GrandChildError; 5
+	    end
+          end },
+      # deep rescue nesting
+      %q{ begin
+	    1; raise ParentError; 2
+          rescue ParentError
+	    begin
+	      3; raise ParentError; 4
+	    rescue ParentError; 5
+              begin
+                6; raise ChildError; 8
+              rescue GrandChildError; 9
+              end
+	    end
+          end },
+      # multiple classes in a rescue
+      %q{ begin
+	    1; raise ChildError; 2
+          rescue GrandChildError, ParentError; 3
+          end },
+      # multiple classes in a rescue, no match
+      %q{ begin
+	    1; raise ParentError; 2
+          rescue GrandChildError, ChildError; 3
+          end },
+    ]
+
+    stmts.each do |stmt|
+      # compilation for value + lets uncaught exceptions through
+      compare stmt
+
+      # compilation for void + tracks flow through the code
+      stmt = stmt.gsub(/\d/) {|match| "a << #{match}"}
+      compare "a = []; begin; #{stmt}; rescue Exception; a << 99; end; a"
+    end
+
+    compare <<-EORUBY # arbitrary expressions in a rescue
+      a = [ChildError, ParentError]
+      begin
+	raise ParentError; 1
+      rescue a[0], a[1];   2
+      end
+    EORUBY
+    compare <<-EORUBY # raised in lower frame, not caught
+      o = "test"
+      def o.simple_raise
+	1; raise ParentError; 2
+      end
+      begin 
+	3; o.simple_raise;    4
+      rescue ChildError;      5
+      end
+    EORUBY
+    compare <<-EORUBY # raised in lower frame, caught higher
+      o = "test"
+      def o.simple_raise
+	1; raise ParentError; 2
+      end
+      begin
+	3; o.simple_raise;    4
+      rescue ParentError;     5
+      end
+    EORUBY
+    compare <<-EORUBY # raised in lower frame, caught there
+      o = "test"
+      def o.raise_and_rescue
+	begin
+	  1; raise ParentError; 2
+	rescue ParentError;     3
+	end
+      end
+      begin
+	4; o.raise_and_rescue;  5
+      rescue ParentError;       6
+      end
+    EORUBY
+    compare <<-EORUBY # raised in lower frame, not caught there
+      o = "test"
+      def o.raise_and_rescue
+	begin
+	  1; raise ParentError; 2
+	rescue ChildError;      3
+	end
+      end
+      begin
+	4; o.raise_and_rescue;  5
+      rescue ParentError;       6
+      end
+    EORUBY
+
+
+return 
+    # failing tests
+    compare %q{
+      i = 0;
+      while i < 5
+	begin
+	  raise ChildError
+        rescue ChildError
+          break
+        end
+      end; i }
     
-  #end
+    compare <<-EORUBY
+      begin;  raise "cain"
+      rescue "not an exception class"
+      end
+    EORUBY
+
+    # TO TEST
+    # resume execution after a rescue clause
+    # TO DO
+    # else
+    # retry
+    # integrate compilation with case statement
+    # unwind value stack along with call stack
+   
+  end
+  
+
+  def testStackAndJumps
+return
+    # The following (unnatural) code breaks the stack - 
+    # result should be "ae", but in BCR the stack at the time of the first +
+    # is "a", "b", "e", so the result is "be". The break should clear
+    # the stack back to where it was when the expression it's part of
+    # first started being evaluated. Other non-local jumps (correct term?) 
+    # will behave in the same way.
+    compare <<-EORUBY
+      "a" + begin
+	      while true
+		"b" + begin break; "c" end
+	      end
+	      "e"
+	    end
+    EORUBY
+  end
 end
 
 # Run if we were directly called

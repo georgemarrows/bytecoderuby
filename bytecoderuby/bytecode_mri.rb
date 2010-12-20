@@ -43,9 +43,14 @@ module Bytecode
         code_vector << bc_code << offset
       end
     end
-    def fixup(code_vector)
-      return [bc_code, code_vector.offset_for_label(offset)]
+    def fixup(code_vector, current_pc)
+      relative_tgt = code_vector.labels.offset_for_label(offset)
+      @absolute_tgt = current_pc + relative_tgt
+      return [bc_code, relative_tgt]
     end
+    def to_s
+      "#{type.name}\t#{@absolute_tgt}"
+    end	    
   end
 
   module LocalInstruction

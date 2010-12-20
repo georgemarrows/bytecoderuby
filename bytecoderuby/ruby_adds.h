@@ -11,5 +11,5 @@ VALUE rb_call( VALUE klass, VALUE recv, ID mid, int argc,
 NODE * rb_get_method_body_in_cache(VALUE klass, VALUE recv, ID mid, int argc, 
 				   VALUE *argv, int scope);
 
-
-
+VALUE safe_call_cfunc(VALUE (*func)(), VALUE recv, int len, int argc, VALUE *argv, 
+		      VALUE (*e_proc)(), VALUE data2);

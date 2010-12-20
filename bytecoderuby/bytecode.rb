@@ -29,6 +29,9 @@ Pushes a second copy of the top of the stack on to the stack.
 POP,     <no args>
 Discards the value on the top of the stack.
 
+POP,     <no args>
+Swaps the top two items on the stack.
+
 CALL,    [method_id, num_args, block]
 Calls the method given by METHOD_ID. NUM_ARGS+1 values are popped off 
 the stack - the first is the receiver of the message, the rest are 
@@ -71,11 +74,21 @@ Rolls the call stack back to the first frame that is also present on the
 static chain. Raises a LocalJumpError if there is no such frame on the
 call stack. 
 
-CLASS, [name, body]
-Creates (or refetches) a class called NAME under the class/module given by
-SELF (error if SELF isn't a class or module). The stack is popped to obtain
-the superclass of the new class (so it must be a class). BODY is executed 
-with the new (refetched) class as self. 
+LD_IVAR, [var_id]
+Pops an object off the stack. Pushes the value of the instance variable 
+VAR_ID of the object that was tos.
+
+ST_IVAR, [var_id]
+Pops two items off the stack. Stores the item that was one below the top 
+of stack into the instance variable VAR_ID of the object that was tos.
+
+DEFS FIXME
+
+LD_SELF
+Pushes self on to the stack
+
+ST_SELF
+Pops the stack and stores the value into self. (Short term hack!)
 =end
 
 module Bytecode
@@ -99,7 +112,6 @@ module Bytecode
 
   module LocalInstruction
   end
-
 
   # FIXME move these to a tools module?
   def Bytecode.camel_case(name)
@@ -161,21 +173,35 @@ module Bytecode
 
 
   instruction 'LD_IMM',      ['value']
+  instruction 'LD_SELF',     []
+  instruction 'ST_SELF',     []
   instruction 'LD_LOC',      ['var'],                   'LocalInstruction' 
   instruction 'LD_LOC_L',    ['var', 'count'],          'LocalInstruction' 
   instruction 'ST_LOC',      ['var'],                   'LocalInstruction'  
   instruction 'ST_LOC_L',    ['var', 'count'],          'LocalInstruction' 
+  instruction 'LD_IVAR',     ['var_id']
+  instruction 'ST_IVAR',     ['var_id']
+
   instruction 'DUP',         []
   instruction 'POP',         []
-  instruction 'CALL',        ['method_id', 'num_args', 'block']
-  instruction 'RETURN',      ['count']	
+  instruction 'SWAP',        []
+  instruction 'ARY_SCATTER', ['num_elems', 'gather', 'push_value']
+
   instruction 'GOTO',        ['offset'],                'BranchInstruction'
   instruction 'IF',          ['offset'],                'BranchInstruction'
   instruction 'IF_NOT',      ['offset'],                'BranchInstruction'
+
+  instruction 'CALL',        ['method_id', 'num_args', 'block']
+  instruction 'RETURN',      ['count']	
   instruction 'YIELD',       ['num_args', 'count']
-  instruction 'DEFN',        ['name', 'code']
-  instruction 'ARY_SCATTER', ['num_elems', 'gather', 'push_value']
   instruction 'BREAK',       []
+
+  instruction 'DEFN',        ['name', 'code']
+  instruction 'DEFS',        ['name', 'code']
+
+  # temporary instruction for initial rescue, ensure coding	
+  instruction 'RAISE',       []
+  instruction 'REHANDLE',    []
 
   def Bytecode.each_instruction
     constants.each do |name|

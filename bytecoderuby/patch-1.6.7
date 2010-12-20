@@ -1,6 +1,6 @@
---- ../ruby-1.6.5/eval.c	Tue Sep 18 05:47:02 2001
-+++ ../ruby-1.6.5.hack/eval.c	Fri Jan 11 22:30:18 2002
-@@ -252,7 +252,7 @@
+--- /dos2/George/ruby/ruby-1.6.7/eval.c	Wed Feb 27 04:50:29 2002
++++ /dos2/George/ruby/ruby-1.6.7.hack/eval.c	Tue Apr  9 20:53:30 2002
+@@ -253,7 +253,7 @@
      return body;
  }
  
@@ -9,8 +9,39 @@
  rb_get_method_body(klassp, idp, noexp)
      VALUE *klassp;
      ID *idp;
-@@ -4194,7 +4194,7 @@
- #endif
+@@ -3510,6 +3510,7 @@
+ rb_block_given_p()
+ {
+     if (ruby_frame->iter) return Qtrue;
++    if (bcr_hooks.block_given_p && bcr_hooks.block_given_p()) return Qtrue;
+     return Qfalse;
+ }
+ 
+@@ -3544,6 +3545,14 @@
+     int state;
+     static unsigned serial = 1;
+ 
++    if (bcr_hooks.yield) {
++      result = bcr_hooks.yield(val);
++      if (result != Qundef) { /* Qundef signals no-go for BCR */
++	return result;
++      }
++      result = Qnil;
++    }
++
+     if (!rb_block_given_p()) {
+ 	rb_raise(rb_eLocalJumpError, "no block given");
+     }
+@@ -4050,6 +4059,7 @@
+     return result;
+ }
+ 
++
+ VALUE
+ rb_with_disable_interrupt(proc, data)
+     VALUE (*proc)();
+@@ -4237,7 +4247,7 @@
+     }
  }
  
 -static VALUE
@@ -18,35 +49,23 @@
  call_cfunc(func, recv, len, argc, argv)
      VALUE (*func)();
      VALUE recv;
-@@ -4354,6 +4354,27 @@
+@@ -4395,6 +4405,15 @@
  	    }
  	}
  	break;
 +      case NODE_BFUNC:
 +	{
-+	    VALUE cRunner;
-+	    ID run_method_id;
-+
-+	    int len = body->nd_argc;
-+	    if (len < 0 || argc != len) {
-+	      rb_raise(rb_eArgError, "wrong # of arguments(%d for %d)",
-+		       argc, len);
-+	    }
-+
-+	    /* Hack alert! */
-+	    cRunner = rb_const_get(rb_cObject, rb_intern("Bytecode"));
-+	    cRunner = rb_const_get(cRunner,    rb_intern("Runner"));
-+	    run_method_id = rb_intern("run");
-+
-+	    result = rb_funcall(cRunner, run_method_id, 4, 
-+				body->nd_cfnc, recv, argc, argv);
-+
++	  if (!bcr_hooks.call) {
++	    rb_raise(rb_eStandardError, "bytecode extensions not loaded");
++	  }
++	  
++	  result = (*bcr_hooks.call)(body->nd_cfnc, recv, argc, argv);
 +	}
 +	break;
  
  	/* for attr get/set */
        case NODE_IVAR:
-@@ -4517,7 +4538,39 @@
+@@ -4562,7 +4581,40 @@
      return result;
  }
  
@@ -72,7 +91,8 @@
 +    if (ent->mid == mid && ent->klass == klass) {
 +      if (!ent->method)
 +	/* FIXME this isn't right! */
-+	return rb_undefined(recv, mid, argc, argv, scope==2?CSTAT_VCALL:0);
++	return (NODE *) rb_undefined(recv, mid, argc, argv, 
++				     scope==2?CSTAT_VCALL:0);
 +      klass = ent->origin;
 +      id    = ent->mid0; // FIXME - don't understand this yet
 +      noex  = ent->noex;
@@ -87,8 +107,17 @@
  rb_call(klass, recv, mid, argc, argv, scope)
      VALUE klass, recv;
      ID    mid;
---- ../ruby-1.6.5/node.h	Fri Apr  6 07:42:40 2001
-+++ ../ruby-1.6.5.hack/node.h	Mon Dec 17 22:28:06 2001
+@@ -8989,6 +9041,8 @@
+     rb_define_method(cThGroup, "list", thgroup_list, 0);
+     rb_define_method(cThGroup, "add", thgroup_add, 1);
+     rb_define_const(cThGroup, "Default", thgroup_s_new(0, 0, cThGroup));
++
++    memset(&bcr_hooks, 0, sizeof(bcr_hooks));
+ }
+ 
+ static VALUE
+--- /dos2/George/ruby/ruby-1.6.7/node.h	Wed Feb 27 04:50:30 2002
++++ /dos2/George/ruby/ruby-1.6.7.hack/node.h	Mon Apr  1 12:53:34 2002
 @@ -121,6 +121,7 @@
      NODE_DMETHOD,
      NODE_BMETHOD,
@@ -97,3 +126,23 @@
      NODE_LAST
  };
  
+--- /dos2/George/ruby/ruby-1.6.7/ruby.h	Tue Feb 26 13:08:17 2002
++++ /dos2/George/ruby/ruby-1.6.7.hack/ruby.h	Fri Apr  5 21:31:00 2002
+@@ -618,6 +618,17 @@
+ #define rb_sys_stat stat
+ #endif
+ 
++/* Hooks for ByteCodeRuby */
++typedef VALUE (*BCRCall) _(( void *code, VALUE recv, int argc, VALUE *argv ));
++
++struct bcr_hooks {
++
++  BCRCall call;
++  VALUE (*yield)         _(( VALUE val ));
++  int   (*block_given_p) _(( void ));
++
++} bcr_hooks;
++
+ #if defined(__cplusplus)
+ }  /* extern "C" { */
+ #endif

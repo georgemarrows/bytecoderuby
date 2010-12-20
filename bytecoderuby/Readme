@@ -1,25 +1,15 @@
 ByteCodeRuby
 ============
-Version:      0.1.1
-Release date: 2002-03-17
+Version:      0.1.2
+Release date: 2002-05-01
 Author:       George Marrows, triptych@ntlworld.com
+
 
 What is it?
 -----------
-The beginnings of a bytecode interpreter for Ruby. I'd guess that support for the syntax of the Ruby language is perhaps 30% done. Overall support for the Ruby platform (ie language + those library methods requiring VM cooperation) is at perhaps 15%
+The beginnings of a bytecode interpreter for Ruby. Standard Ruby produces a parse tree from your source code and then interprets the parse tree directly. ByteCodeRuby inserts some additional steps: it takes Ruby's parse tree and compiles it to bytecode, ie the instruction set for a virtual machine. It then interprets the bytecode. The hope is that eventually this approach will lead to improved performance for the Ruby interpreter.
 
-It consists of a (minor) patch to Ruby 1.6.7's eval.c and node.h, a C extension
-and some Ruby code. It's currently at an experimental stage: you won't be able to run your favourite Ruby script with it, but you can compile a subset of Ruby to bytecode, and then run the bytecode. The subset covers:
-  method calls (must be either C or bytecode methods)
-  method definition ('standard' arguments only - no optional, * or & args)
-  local variables
-  return
-  if .. else
-  while, next, break, redo
-  blocks with method calls
-  next, break, redo for blocks
-  multiple assignment
-  and, or
+It consists of a (minor) patch to Ruby 1.6.7's eval.c, ruby.h and node.h, a C extension and some Ruby code. It's currently at an experimental stage (you won't be able to run your favourite Ruby script with it), but you can nonetheless compile a limited subset of Ruby to bytecode, and then run the bytecode.
 
 
 Why?
@@ -40,7 +30,7 @@ Installation?
     c. ruby helpers/install.rb
 
  3. patch Ruby 1.6.7
-    a. copy bytecoderuby-0.1.1/patch-1.6.7 to your Ruby 1.6.7 build area 
+    a. copy bytecoderuby-0.1.2/patch-1.6.7 to your Ruby 1.6.7 build area 
        (ie in the same directory as eval.c etc)
     b. cd into that directory
     c. patch -b <patch-1.6.7  
@@ -49,32 +39,26 @@ Installation?
     d. make install
 
  4. compile and run ByteCodeRuby
-    a. cd bytecoderuby-0.1.1
+    a. cd bytecoderuby-0.1.2
     b. ruby extconf.rb
     c. make
-    d. ruby tests/testByteCodeRuby.rb to run the unit tests (needs RubyUnit)
+    d. ruby tests/testByteCodeRuby.rb to try it out
 
 
 Example of use?
 ---------------
-See:
-- tests/testByteCodeRuby.rb (unit tests for compilation and evaluation)
-- example.rb (uses bytecode assembly language) 
+See tests/testByteCodeRuby.rb (unit tests for compilation and evaluation)
 
 
 Requirements?
 -------------
 ByteCodeRuby uses Robert Feldt's Ruth wrapper round the standard Ruby parser, version 0.8.0. Ruth is included in the ByteCodeRuby download.
 
-You'll need RubyUnit to run the unit tests - I used version 0.4.4.
-
-ByteCodeRuby 0.1.1 has been tested on the following set-ups:
+ByteCodeRuby 0.1.2 has been tested on the following set-ups:
 
   * Linux with Ruby 1.6.7 and gcc version 2.96 20000731
 
-The previous version (0.1.0) worked OK with:
-
-  * Windows 2000 Pro with Ruby 1.6.5, cygwin and gcc version 2.95.3-1
+An earlier version was tested successfully on Windows 2000 Pro with Ruby 1.6.5, cygwin and gcc version 2.95.3-1
 
 It may work on other platforms, but I can't guarantee it. I'd be very grateful
 to anyone who was willing to try it on another platform and let me know the
@@ -114,7 +98,7 @@ See Todo.
 
 Acknowledgements
 ----------------
-Thanks to Matz for producing such a clean and easy to understand interpreter (though I haven't got round to looking at all those stacks of jmp_bufs yet..)
+Thanks to Matz for producing such a clean and easy to understand interpreter.
 
 Thanks to Robert Feldt, for producing Ruth and hosting this under his RubyVM project at SourceForge.
 

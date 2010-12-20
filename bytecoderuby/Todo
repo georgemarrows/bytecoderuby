@@ -2,13 +2,12 @@ Ruby language support
 =====================
 - local variables
 - frames
-* methods
+- methods
 	- definition
 	- call stack; call bytecode methods from bytecode methods
-	- arguments
-	* scatter, gather, optional args
+	- arguments: scatter args, gather args, optional args
 	- multiple results
-* instance variables
+- instance variables
 * call
 	* trap no such method errors
 	* test for -2 argc methods
@@ -18,10 +17,13 @@ Ruby language support
 	- next, break, redo, return
 	* retry
 	- dynamic local variables
-	* pass blocks to C functions
+	- pass blocks to C functions
+	* ampersand parameters to methods
 * class, module definitions
-* singleton methods
-* exceptions: rescue, ensure
+* get and set constants
+- singleton methods
+* exceptions: raise and rescue
+* ensure
 * throw, catch
 * global variables
 
@@ -31,7 +33,6 @@ Ruby library support
 * procs <-> methods
 * blocks -> methods
 * eval and friends
-* bindings
 * method_missing
 * set_trace_func
 * backtrace
@@ -43,7 +44,7 @@ Compiler
 ========
 All the above plus:
 - allow methods to take arguments
-* not
+- not
 - array literals
 * hash literals
 * range literals
@@ -55,7 +56,14 @@ All the above plus:
 - next, redo, break in while and until loops
 - allow blocks to be defined and yielded to
 - multiple assignment
-* tests for block arg options (scatter, gather etc)
+- tests for block arg options (scatter, gather etc)
+* tests for singleton method definition
+- case statements
+
+Bugs
+====
+* testStackAndJumps
+* cross-refs between the Bytecode::Writer::Manager classes are ugly
 
 Interpreter infrastructure
 ==========================
@@ -65,6 +73,7 @@ Interpreter infrastructure
 * per-frame stacks?
 * bytecode dump and load
 * string, integer literals
+* declare bytecode effects in Ruby (like vmgen)
 * experiment with registers and arg sets rather than stack?
 
 Other guff
@@ -82,8 +91,9 @@ Possible future optimisations
 	- allocate frames from a linear stack where possible (eg no block calls)
 * inline various interpreter C functions
 * threaded bytecode dispatch
+* optimise argument handling for method calls
+* optimise yield to not go through an array
 * optimise a, b = b, a etc to not go through an intermediate array
-* optimise similar case for yield to not go through an array
 * static optimisation of bytecodes
 * macro bytecodes (dynamic optimisation)
 * method lookup using displays
